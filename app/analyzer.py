@@ -39,7 +39,7 @@ ANALYSIS_SCHEMA: Dict[str, Any] = {
                 "type": "object",
                 "required": ["question_id", "issue_id", "affected_requirements", "question", "reason", "priority"],
                 "properties": {
-                    "question_id": {"type": "string"},
+                    "question_id": {"type": "string", "pattern": "^Q-[0-9]{3,}$"},
                     "issue_id": {"type": "string"},
                     "affected_requirements": {"type": "array", "items": {"type": "string"}},
                     "question": {"type": "string"},
@@ -63,6 +63,7 @@ class RequirementsAnalyzer:
         if not raw:
             raise ExtractionError("the analysis extractor returned an empty response")
         payload = dict(raw)
+        payload["clarification_questions"] = [self._normalize_question(item) for item in payload.get("clarification_questions", [])]
         payload.update({
             "brd_id": requirements.brd_id,
             "analysis_id": self._analysis_id(requirements),
@@ -76,6 +77,16 @@ class RequirementsAnalyzer:
             raise ExtractionError(f"invalid Requirements Analysis from extractor: {exc}") from exc
         logger.info("requirements analysis completed brd_id=%s issues=%d", requirements.brd_id, len(result.issues))
         return result
+
+    @staticmethod
+    def _normalize_question(question: Any) -> Any:
+        if not isinstance(question, dict):
+            return question
+        normalized = dict(question)
+        question_id = normalized.get("question_id")
+        if isinstance(question_id, str) and question_id.upper().startswith("QST-"):
+            normalized["question_id"] = "Q-" + question_id[4:]
+        return normalized
 
     @staticmethod
     def _analysis_id(requirements: RequirementsModel) -> str:
@@ -98,4 +109,4 @@ class RequirementsAnalyzer:
     @staticmethod
     def _build_prompt(requirements: RequirementsModel) -> str:
         model_json = requirements.model_dump_json(indent=2)
-        return f"""Analyze only the supplied Requirements Model. Do not re-parse an original BRD and do not invent requirements, actors, policies, SLAs, time limits, workflows, integrations, security controls, retention policies, technical decisions, or answers. Preserve every existing requirement ID exactly. Identify only meaningful, material ambiguity, missing information/gaps, genuine conflicts, and meaningful inconsistencies that could affect business behavior, architecture, data, security, integrations, workflows, APIs, testing, or implementation. Do not flag writing style. Do not silently resolve any issue. For each issue provide a unique prefixed issue_id (AMB-, GAP-, CON-, or INC-), type, severity (LOW, MEDIUM, HIGH, or CRITICAL), title, description, affected requirement IDs, reason, severity_reason, and clarification_required. Generate a neutral clarification question only when the issue materially affects implementation/design and cannot be derived from the model. Questions must not suggest an answer or introduce thresholds, actors, workflows, or policies. Use empty arrays when no findings exist.\n\nREQUIREMENTS MODEL:\n{model_json}"""
+        return f"""Analyze only the supplied Requirements Model. Do not re-parse an original BRD and do not invent requirements, actors, policies, SLAs, time limits, workflows, integrations, security controls, retention policies, technical decisions, or answers. Preserve every existing requirement ID exactly. Identify only meaningful, material ambiguity, missing information/gaps, genuine conflicts, and meaningful inconsistencies that could affect business behavior, architecture, data, security, integrations, workflows, APIs, testing, or implementation. Do not flag writing style. Do not silently resolve any issue. For each issue provide a unique prefixed issue_id (AMB-, GAP-, CON-, or INC-), type, severity (LOW, MEDIUM, HIGH, or CRITICAL), title, description, affected requirement IDs, reason, severity_reason, and clarification_required. For each question use the exact question_id format Q-001, Q-002, ... . Generate a neutral clarification question only when the issue materially affects implementation/design and cannot be derived from the model. Questions must not suggest an answer or introduce thresholds, actors, workflows, or policies. Use empty arrays when no findings exist.\n\nREQUIREMENTS MODEL:\n{model_json}"""

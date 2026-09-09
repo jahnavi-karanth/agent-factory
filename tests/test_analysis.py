@@ -69,6 +69,16 @@ def test_analysis_returns_structured_findings_and_neutral_questions():
     assert result.clarification_questions[0].question.startswith("Which events")
 
 
+def test_normalizes_qst_question_ids():
+    payload = analysis_payload()
+    payload["clarification_questions"][0]["question_id"] = "QST-001"
+    class QstExtractor:
+        def generate_json(self, prompt, schema):
+            return payload
+    result = RequirementsAnalyzer(QstExtractor()).analyze(requirements_model())
+    assert result.clarification_questions[0].question_id == "Q-001"
+
+
 def test_analysis_endpoint_consumes_requirements_model_directly():
     app = create_app(analyzer=RequirementsAnalyzer(FakeAnalysisExtractor()))
     response = TestClient(app).post("/api/requirements/analyze", json=requirements_model().model_dump(mode="json"))
