@@ -1,0 +1,547 @@
+{
+  "version": "1.0.0",
+  "description": "Canonical seed knowledge base for the AI Software Development Factory.",
+  "patterns": [
+    {
+      "id": "PAT-001",
+      "name": "ReAct",
+      "description": "An agent alternates between reasoning about the current problem and taking actions through tools, then uses the observations to decide the next step.",
+      "intent": "Enable an agent to iteratively reason, act, observe results, and continue until it has enough evidence or reaches a useful outcome.",
+      "structure": [
+        "Reason",
+        "Act",
+        "Observe",
+        "Repeat"
+      ],
+      "when_to_use": [
+        "The task requires iterative investigation.",
+        "The agent needs external tools or APIs to gather information.",
+        "The next action depends on the result of a previous action."
+      ],
+      "when_not_to_use": [
+        "The task is a simple deterministic transformation.",
+        "No tools or iterative reasoning are required.",
+        "A fixed sequence of steps is sufficient."
+      ],
+      "prerequisites": [
+        "An LLM capable of tool/function calling",
+        "One or more well-defined tools",
+        "A bounded stopping condition"
+      ],
+      "strengths": [
+        "Flexible investigation",
+        "Good for tool-driven tasks",
+        "Can adapt actions based on observations"
+      ],
+      "weaknesses": [
+        "Can consume many model calls",
+        "May make unnecessary tool calls",
+        "Requires strong stopping and error handling"
+      ],
+      "references": [
+        "Yao et al., ReAct: Synergizing Reasoning and Acting in Language Models"
+      ],
+      "tags": [
+        "reasoning",
+        "tool-use",
+        "iterative",
+        "agent"
+      ]
+    },
+    {
+      "id": "PAT-002",
+      "name": "Reflection",
+      "description": "An agent generates an output and then evaluates its own work to identify weaknesses and improve the result.",
+      "intent": "Improve output quality by explicitly evaluating and revising an initial result.",
+      "structure": [
+        "Generate",
+        "Reflect",
+        "Revise"
+      ],
+      "when_to_use": [
+        "Quality can be improved through self-critique.",
+        "The output has measurable or inspectable weaknesses.",
+        "A second pass is cheaper than recovering from a poor final result."
+      ],
+      "when_not_to_use": [
+        "The task is trivial.",
+        "There is no useful signal for evaluating the output.",
+        "Latency or token cost is extremely constrained."
+      ],
+      "prerequisites": [
+        "A generation step",
+        "An evaluation rubric",
+        "A bounded revision count"
+      ],
+      "strengths": [
+        "Improves quality",
+        "Simple to understand",
+        "Useful for iterative refinement"
+      ],
+      "weaknesses": [
+        "Adds latency and token usage",
+        "Self-evaluation can share the original model's blind spots"
+      ],
+      "references": [
+        "Madaan et al., Self-Refine: Iterative Refinement with Self-Feedback"
+      ],
+      "tags": [
+        "self-correction",
+        "evaluation",
+        "refinement",
+        "quality"
+      ]
+    },
+    {
+      "id": "PAT-003",
+      "name": "Planner-Executor",
+      "description": "A planning component creates an ordered plan and an executor carries out the individual steps.",
+      "intent": "Separate high-level planning from detailed execution for complex multi-step tasks.",
+      "structure": [
+        "Understand Goal",
+        "Create Plan",
+        "Execute Steps",
+        "Validate"
+      ],
+      "when_to_use": [
+        "The task contains multiple dependent steps.",
+        "The execution order matters.",
+        "The plan can be evaluated before expensive execution begins."
+      ],
+      "when_not_to_use": [
+        "The task is a single-step operation.",
+        "The plan changes so frequently that planning provides little value."
+      ],
+      "prerequisites": [
+        "Structured task representation",
+        "Dependency handling",
+        "Execution state"
+      ],
+      "strengths": [
+        "Clear decomposition",
+        "Supports dependency management",
+        "Easy to inspect before execution"
+      ],
+      "weaknesses": [
+        "Plans can become stale",
+        "Planning adds an extra model step"
+      ],
+      "references": [
+        "General plan-and-execute agent architecture"
+      ],
+      "tags": [
+        "planning",
+        "execution",
+        "decomposition",
+        "workflow"
+      ]
+    },
+    {
+      "id": "PAT-004",
+      "name": "Multi-Agent Debate",
+      "description": "Multiple agents independently analyze a problem and then compare or debate their conclusions.",
+      "intent": "Improve reasoning robustness by exposing a decision to independent perspectives and disagreement.",
+      "structure": [
+        "Parallel Analyses",
+        "Compare",
+        "Resolve Disagreement",
+        "Final Decision"
+      ],
+      "when_to_use": [
+        "There are multiple plausible hypotheses.",
+        "Independent perspectives can reveal blind spots.",
+        "Conflicting evidence needs explicit comparison."
+      ],
+      "when_not_to_use": [
+        "The task is simple and deterministic.",
+        "The additional model calls are not justified.",
+        "Agents would all have identical information and reasoning."
+      ],
+      "prerequisites": [
+        "Multiple agent roles",
+        "Shared problem context",
+        "A comparison or adjudication step"
+      ],
+      "strengths": [
+        "Encourages diverse reasoning",
+        "Useful for hypothesis comparison",
+        "Makes disagreement explicit"
+      ],
+      "weaknesses": [
+        "Higher cost",
+        "Consensus can still be wrong",
+        "Requires careful role and evidence design"
+      ],
+      "references": [
+        "Multi-agent debate and deliberation architectures"
+      ],
+      "tags": [
+        "multi-agent",
+        "debate",
+        "consensus",
+        "hypothesis"
+      ]
+    },
+    {
+      "id": "PAT-005",
+      "name": "Router",
+      "description": "A routing component classifies an incoming request and directs it to the most appropriate specialized workflow or agent.",
+      "intent": "Select the appropriate capability based on the type or characteristics of the request.",
+      "structure": [
+        "Classify",
+        "Route",
+        "Specialized Processing"
+      ],
+      "when_to_use": [
+        "Requests fall into distinct categories.",
+        "Different categories need different tools or prompts.",
+        "Specialized workflows outperform a single general workflow."
+      ],
+      "when_not_to_use": [
+        "All requests require the same workflow.",
+        "The categories are poorly defined or overlap heavily."
+      ],
+      "prerequisites": [
+        "Defined routes",
+        "Routing criteria",
+        "Fallback route"
+      ],
+      "strengths": [
+        "Reduces unnecessary work",
+        "Supports specialization",
+        "Easy to extend with new routes"
+      ],
+      "weaknesses": [
+        "Misrouting can degrade results",
+        "Requires good classification"
+      ],
+      "references": [
+        "General routing architecture for agentic systems"
+      ],
+      "tags": [
+        "routing",
+        "classification",
+        "specialization",
+        "workflow"
+      ]
+    },
+    {
+      "id": "PAT-006",
+      "name": "RAG",
+      "description": "Retrieval-Augmented Generation retrieves relevant external knowledge and supplies it to an LLM before generation.",
+      "intent": "Ground model outputs in project-specific or external information that is not reliably contained in model parameters.",
+      "structure": [
+        "Query",
+        "Retrieve",
+        "Augment Context",
+        "Generate"
+      ],
+      "when_to_use": [
+        "The task depends on private or changing knowledge.",
+        "Answers need evidence from documents or a knowledge base.",
+        "The relevant information is too large to place entirely in the prompt."
+      ],
+      "when_not_to_use": [
+        "The task requires no external knowledge.",
+        "The required information is already small and fully available in the request."
+      ],
+      "prerequisites": [
+        "Document ingestion",
+        "Chunking",
+        "Embeddings or another retrieval method",
+        "Vector or searchable store"
+      ],
+      "strengths": [
+        "Grounds responses",
+        "Works with private knowledge",
+        "Can provide source provenance"
+      ],
+      "weaknesses": [
+        "Poor retrieval produces poor answers",
+        "Requires ingestion and indexing infrastructure"
+      ],
+      "references": [
+        "Lewis et al., Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks"
+      ],
+      "tags": [
+        "rag",
+        "retrieval",
+        "knowledge",
+        "grounding",
+        "embeddings"
+      ]
+    },
+    {
+      "id": "PAT-007",
+      "name": "Tool-Use",
+      "description": "An LLM invokes structured external tools to perform actions or retrieve information that the model cannot reliably perform internally.",
+      "intent": "Extend agent capabilities with deterministic functions, APIs, databases, search, or other external systems.",
+      "structure": [
+        "Decide Tool",
+        "Call Tool",
+        "Observe Result",
+        "Continue"
+      ],
+      "when_to_use": [
+        "External information or actions are required.",
+        "A deterministic API or function can perform the task more reliably.",
+        "The model needs capabilities outside text generation."
+      ],
+      "when_not_to_use": [
+        "The task can be completed accurately without tools.",
+        "A tool would introduce unnecessary risk or complexity."
+      ],
+      "prerequisites": [
+        "Explicit tool schemas",
+        "Validation",
+        "Authorization",
+        "Error handling"
+      ],
+      "strengths": [
+        "Connects agents to real capabilities",
+        "Allows deterministic operations",
+        "Supports current data"
+      ],
+      "weaknesses": [
+        "Tool errors affect the workflow",
+        "Requires security controls",
+        "External dependencies can fail"
+      ],
+      "references": [
+        "LLM function/tool calling architecture"
+      ],
+      "tags": [
+        "tools",
+        "function-calling",
+        "apis",
+        "actions"
+      ]
+    },
+    {
+      "id": "PAT-008",
+      "name": "Hierarchical Agents",
+      "description": "A higher-level agent coordinates specialized lower-level agents or sub-workflows.",
+      "intent": "Manage complex work by delegating subtasks to specialized agents under a coordinating agent.",
+      "structure": [
+        "Coordinator",
+        "Delegate",
+        "Specialist Agents",
+        "Aggregate"
+      ],
+      "when_to_use": [
+        "The problem naturally decomposes into specialized domains.",
+        "Different subtasks require different capabilities.",
+        "A coordinator is needed to combine specialist outputs."
+      ],
+      "when_not_to_use": [
+        "The problem is small enough for one agent.",
+        "Delegation overhead outweighs specialization benefits."
+      ],
+      "prerequisites": [
+        "Defined agent roles",
+        "Delegation protocol",
+        "Shared state or result schema"
+      ],
+      "strengths": [
+        "Scales specialization",
+        "Separates responsibilities",
+        "Useful for complex workflows"
+      ],
+      "weaknesses": [
+        "Higher orchestration complexity",
+        "More model calls",
+        "Coordination errors are possible"
+      ],
+      "references": [
+        "Hierarchical multi-agent system architectures"
+      ],
+      "tags": [
+        "hierarchical",
+        "multi-agent",
+        "delegation",
+        "coordination"
+      ]
+    },
+    {
+      "id": "PAT-009",
+      "name": "Critic-Refine",
+      "description": "A separate critic evaluates an artifact against an explicit rubric and sends structured feedback to a generator for revision.",
+      "intent": "Improve generated artifacts using an independent evaluation stage.",
+      "structure": [
+        "Generate",
+        "Critic",
+        "Feedback",
+        "Refine",
+        "Re-evaluate"
+      ],
+      "when_to_use": [
+        "There is a clear quality rubric.",
+        "Generated artifacts such as code, plans, or documents can be reviewed.",
+        "Independent evaluation is useful."
+      ],
+      "when_not_to_use": [
+        "No meaningful evaluation criteria exist.",
+        "The artifact is trivial or deterministic."
+      ],
+      "prerequisites": [
+        "Artifact",
+        "Critic rubric",
+        "Feedback schema",
+        "Bounded retry count"
+      ],
+      "strengths": [
+        "Works well for code and plans",
+        "Makes quality gates explicit",
+        "Supports targeted revision"
+      ],
+      "weaknesses": [
+        "Adds latency and cost",
+        "Critic quality determines improvement quality"
+      ],
+      "references": [
+        "General generator-critic-refinement architectures"
+      ],
+      "tags": [
+        "critic",
+        "review",
+        "refinement",
+        "quality-gate"
+      ]
+    },
+    {
+      "id": "PAT-010",
+      "name": "Map-Reduce / Parallel Workers",
+      "description": "A task is split into independent subtasks that can be processed in parallel and then combined into a final result.",
+      "intent": "Increase throughput and reduce elapsed time for independent units of work.",
+      "structure": [
+        "Map",
+        "Parallel Workers",
+        "Reduce"
+      ],
+      "when_to_use": [
+        "Subtasks are sufficiently independent.",
+        "Results can be combined after parallel processing.",
+        "Latency benefits from concurrency."
+      ],
+      "when_not_to_use": [
+        "Subtasks have strong sequential dependencies.",
+        "The aggregation step is as expensive as sequential execution."
+      ],
+      "prerequisites": [
+        "Independent task partitioning",
+        "Concurrency support",
+        "Aggregation strategy"
+      ],
+      "strengths": [
+        "Reduces wall-clock time",
+        "Naturally supports batch processing",
+        "Scales across independent items"
+      ],
+      "weaknesses": [
+        "Concurrency increases resource usage",
+        "Aggregation can lose important details",
+        "Failures need partial-result handling"
+      ],
+      "references": [
+        "MapReduce programming model and parallel agent architectures"
+      ],
+      "tags": [
+        "parallel",
+        "map-reduce",
+        "concurrency",
+        "batch"
+      ]
+    },
+    {
+      "id": "PAT-011",
+      "name": "Human-in-the-Loop",
+      "description": "The workflow pauses at a defined decision point and requests human input, approval, clarification, or correction before continuing.",
+      "intent": "Keep humans responsible for ambiguous, high-impact, or approval-sensitive decisions.",
+      "structure": [
+        "AI Work",
+        "Interrupt",
+        "Human Decision",
+        "Resume"
+      ],
+      "when_to_use": [
+        "The system needs clarification.",
+        "A decision has significant business or operational impact.",
+        "Human approval is explicitly required."
+      ],
+      "when_not_to_use": [
+        "The workflow is fully deterministic and low risk.",
+        "Human intervention would create unnecessary bottlenecks."
+      ],
+      "prerequisites": [
+        "Persistent workflow state",
+        "Interrupt/resume mechanism",
+        "Human interaction channel"
+      ],
+      "strengths": [
+        "Handles ambiguity",
+        "Adds governance",
+        "Allows human correction"
+      ],
+      "weaknesses": [
+        "Introduces waiting time",
+        "Requires durable state and UI/API integration"
+      ],
+      "references": [
+        "Human-in-the-loop workflow architecture"
+      ],
+      "tags": [
+        "human",
+        "approval",
+        "clarification",
+        "interrupt",
+        "governance"
+      ]
+    },
+    {
+      "id": "PAT-012",
+      "name": "Evaluator-Optimizer",
+      "description": "An evaluator measures an output against defined criteria and an optimizer repeatedly improves it until it meets a bounded quality threshold.",
+      "intent": "Systematically optimize an artifact using measurable evaluation feedback.",
+      "structure": [
+        "Generate",
+        "Evaluate",
+        "Optimize",
+        "Evaluate",
+        "Stop"
+      ],
+      "when_to_use": [
+        "Quality can be measured against explicit criteria.",
+        "Iterative improvement provides meaningful gains.",
+        "A stopping threshold or retry limit can be defined."
+      ],
+      "when_not_to_use": [
+        "There is no reliable evaluation signal.",
+        "Iteration would not materially improve the output."
+      ],
+      "prerequisites": [
+        "Evaluation criteria",
+        "Optimizer/generator",
+        "Stopping condition",
+        "Maximum iterations"
+      ],
+      "strengths": [
+        "Supports measurable quality improvement",
+        "Useful for plans and generated artifacts"
+      ],
+      "weaknesses": [
+        "Can be expensive",
+        "Evaluation metrics may be imperfect",
+        "Requires careful termination rules"
+      ],
+      "references": [
+        "General evaluator-optimizer agent architecture"
+      ],
+      "tags": [
+        "evaluation",
+        "optimization",
+        "iteration",
+        "quality"
+      ]
+    }
+  ]
+}
