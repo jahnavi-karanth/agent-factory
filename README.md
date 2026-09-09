@@ -44,7 +44,7 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set `GEMINI_API_KEY` in `.env` or in the process environment. The key is never stored in source code or logged. The default is the stable `gemini-3.5-flash`, which supports structured outputs and is designed for higher-speed, lower-cost multi-step workflows. Optional variables are `GEMINI_MODEL`, `GEMINI_TIMEOUT_SECONDS` (default `180`), `GEMINI_MAX_RETRIES` (default `1`), `MAX_UPLOAD_BYTES`, and `LOG_LEVEL`. For interactive BRD ingestion, use a supported Flash model; a slower model may require increasing `GEMINI_TIMEOUT_SECONDS`.
+Set `GEMINI_API_KEY` in `.env` or in the process environment. The key is never stored in source code or logged. The default is the stable `gemini-3.5-flash`, which supports structured outputs and is designed for higher-speed, lower-cost multi-step workflows. Optional variables are `GEMINI_MODEL`, `GEMINI_FALLBACK_MODEL` (default `gemini-3.5-flash-lite`), `GEMINI_TIMEOUT_SECONDS` (default `180`), `GEMINI_MAX_RETRIES` (default `2`), `MAX_UPLOAD_BYTES`, and `LOG_LEVEL`. A transient Gemini `503 UNAVAILABLE` response is retried with bounded exponential backoff and then attempted with the fallback model. For interactive BRD ingestion, use a supported Flash model; a slower model may require increasing `GEMINI_TIMEOUT_SECONDS`.
 
 ## Run the application
 
