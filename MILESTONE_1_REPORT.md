@@ -47,7 +47,7 @@ python -m pip install -r requirements.txt
 python -m uvicorn app.main:app --reload
 ```
 
-Gemini settings can be adjusted in `.env`: `GEMINI_MODEL` (default `gemini-3.5-flash`), `GEMINI_FALLBACK_MODEL` (default `gemini-3.5-flash-lite`), `GEMINI_TIMEOUT_SECONDS` (default `180`), and `GEMINI_MAX_RETRIES` (default `2`). A transient Gemini `503 UNAVAILABLE` response is retried with bounded exponential backoff, then attempted with the fallback model. `gemini-3.5-flash` is a stable model with structured-output support. Use a supported Flash model for interactive ingestion.
+Gemini settings can be adjusted in `.env`: `GEMINI_MODEL` (default `gemini-3.5-flash-lite`), `GEMINI_FALLBACK_MODEL` (default `gemini-3.5-flash`), `GEMINI_TIMEOUT_SECONDS` (default `180`), and `GEMINI_MAX_RETRIES` (default `2`). A transient Gemini `503 UNAVAILABLE` response is retried with bounded exponential backoff, then attempted with the fallback model. Use a supported Flash model for interactive ingestion.
 
 OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
 
