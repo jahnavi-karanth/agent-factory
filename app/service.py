@@ -47,13 +47,26 @@ class IngestionService:
         if not isinstance(requirement, dict) or not isinstance(requirement.get("type"), str):
             return requirement
         normalized = dict(requirement)
-        label = requirement["type"].strip().lower().replace("-", "_").replace(" ", "_")
+        original_label = requirement["type"].strip()
+        label = original_label.lower().replace("-", "_").replace(" ", "_")
         aliases = {
             "functional_requirement": "functional",
             "nonfunctional": "non_functional",
             "non_functional_requirement": "non_functional",
             "businessrule": "business_rule",
             "business_rule_requirement": "business_rule",
+            "data_requirement": "data",
+            "data_requirements": "data",
+            "technical": "non_functional",
+            "technical_requirement": "non_functional",
+            "security": "non_functional",
+            "security_requirement": "non_functional",
+            "performance": "non_functional",
+            "performance_requirement": "non_functional",
         }
-        normalized["type"] = aliases.get(label, label)
+        canonical_types = {"functional", "non_functional", "business_rule", "constraint", "data", "other"}
+        canonical = aliases.get(label, label if label in canonical_types else "other")
+        normalized["type"] = canonical
+        if canonical == "other" and label != "other":
+            normalized["original_type"] = original_label
         return normalized

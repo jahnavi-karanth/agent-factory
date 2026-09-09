@@ -25,6 +25,7 @@ class Requirement(BaseModel):
     description: str = Field(min_length=1)
     source: SourceReference
     priority: Optional[str] = None
+    original_type: Optional[str] = None
 
 
 class RequirementsModel(BaseModel):

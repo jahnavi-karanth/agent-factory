@@ -111,6 +111,17 @@ def test_normalizes_title_cased_requirement_types():
     assert model.requirements[0].type == "functional"
 
 
+def test_preserves_unknown_requirement_type_as_other():
+    document = parse_document("generic.md", b"# Generic BRD\nThe product should be easy to use.")
+    raw = {
+        "title": "Generic BRD",
+        "requirements": [{"id": "REQ-001", "type": "user_experience", "description": "The product should be easy to use.", "source": {}, "priority": None}],
+    }
+    model = IngestionService._validate_and_enrich(raw, document)
+    assert model.requirements[0].type == "other"
+    assert model.requirements[0].original_type == "user_experience"
+
+
 def test_parser_normalizes_markdown_and_tracks_headings():
     document = parse_document("test.md", b"# Title\r\n\r\n## Section\r\nBody")
     assert document.text == "# Title\n\n## Section\nBody"
