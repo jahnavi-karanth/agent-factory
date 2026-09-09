@@ -119,7 +119,18 @@ def test_preserves_unknown_requirement_type_as_other():
     }
     model = IngestionService._validate_and_enrich(raw, document)
     assert model.requirements[0].type == "other"
-    assert model.requirements[0].original_type == "user_experience"
+    assert "original_type" not in model.requirements[0].model_dump()
+
+
+def test_source_title_must_match_a_real_document_heading():
+    document = parse_document("generic.md", b"# Generic BRD\n\n## 2. Goals\nThe system shall work.")
+    raw = {
+        "title": "Generic BRD",
+        "requirements": [{"id": "REQ-001", "type": "functional", "description": "The system shall work.", "source": {"title": "invented section", "section": "99"}, "priority": None}],
+    }
+    model = IngestionService._validate_and_enrich(raw, document)
+    assert model.requirements[0].source.title is None
+    assert model.requirements[0].source.section is None
 
 
 def test_parser_normalizes_markdown_and_tracks_headings():
