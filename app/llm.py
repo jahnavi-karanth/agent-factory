@@ -73,12 +73,14 @@ class GeminiExtractor:
         self.max_retries = max_retries if max_retries is not None else int(os.getenv("GEMINI_MAX_RETRIES", "2"))
 
     def extract(self, document: NormalizedDocument) -> Dict[str, Any]:
+        return self.generate_json(self._build_prompt(document), EXTRACTION_SCHEMA)
+
+    def generate_json(self, prompt: str, schema: Dict[str, Any]) -> Dict[str, Any]:
         if not self.api_key:
             raise ExtractionError("GEMINI_API_KEY is not configured")
-        prompt = self._build_prompt(document)
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json", "responseSchema": EXTRACTION_SCHEMA},
+            "generationConfig": {"responseMimeType": "application/json", "responseSchema": schema},
         }
         body = json.dumps(payload).encode("utf-8")
         last_error: Optional[Exception] = None

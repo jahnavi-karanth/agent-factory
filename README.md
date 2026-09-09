@@ -115,3 +115,35 @@ The model adds `source_filename`, `extraction_metadata`, and a structured `Sourc
 - The API does not persist workflow state or results; persistence belongs to a later milestone.
 - Requirement ordering and IDs are validated as sequential `REQ-001`, `REQ-002`, etc. The extractor is instructed to emit them in document order.
 - This milestone extracts stated content only. It deliberately does not detect ambiguity, gaps, contradictions, or clarification questions.
+
+## Milestone 2: Requirements Analysis and Clarification Questions
+
+Milestone 2 consumes the validated Milestone 1 Requirements Model directly. It does not re-parse the original BRD and does not require a database. It asks Gemini to identify only meaningful ambiguity, gaps, conflicts, and inconsistencies, then validates all issue and question references deterministically.
+
+### Analyze a Requirements Model
+
+```text
+POST /api/requirements/analyze
+Content-Type: application/json
+```
+
+The request body is the complete JSON Requirements Model returned by `POST /api/brd/upload`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/requirements/analyze \
+  -H 'Content-Type: application/json' \
+  --data @requirements-model.json
+```
+
+The response contains `analysis_id`, `status`, a summary, structured issues, and neutral clarification questions. Existing requirement IDs are preserved and every referenced ID must exist in the submitted model.
+
+Issue severity uses this vocabulary:
+
+| Severity | Meaning |
+|---|---|
+| `LOW` | Minor uncertainty unlikely to affect architecture |
+| `MEDIUM` | Could affect implementation or one component |
+| `HIGH` | Could materially affect workflow, data, security, integrations, or architecture |
+| `CRITICAL` | Could fundamentally change the design or make implementation incorrect |
+
+Milestone 2 does not accept human answers or modify requirements. Human answer resolution belongs to a later milestone.
