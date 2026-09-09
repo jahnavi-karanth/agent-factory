@@ -39,7 +39,8 @@ The supplied BRDs are Markdown files, so Milestone 1 supports `.md`, `.markdown`
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
@@ -48,7 +49,7 @@ Set `GEMINI_API_KEY` in `.env` or in the process environment. The key is never s
 ## Run the application
 
 ```bash
-uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload
 ```
 
 Interactive OpenAPI documentation is available at <http://127.0.0.1:8000/docs>.

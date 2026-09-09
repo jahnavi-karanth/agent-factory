@@ -41,10 +41,10 @@ Structured JSON response
 cd agent-factory
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 # Set GEMINI_API_KEY in .env or export it in the shell.
-uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload
 ```
 
 OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
