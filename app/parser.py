@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
+from typing import Optional, Tuple
 
 
 SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt"}
@@ -12,7 +13,7 @@ SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt"}
 class NormalizedDocument:
     filename: str
     text: str
-    headings: tuple[tuple[int, str, int], ...]
+    headings: Tuple[Tuple[int, str, int], ...]
 
 
 def validate_filename(filename: str) -> None:
@@ -40,8 +41,8 @@ def parse_document(filename: str, content: bytes) -> NormalizedDocument:
     return NormalizedDocument(filename=Path(filename).name, text=text, headings=headings)
 
 
-def heading_for_line(document: NormalizedDocument, line_number: int) -> tuple[str | None, str | None]:
-    current: tuple[str | None, str | None] = (None, None)
+def heading_for_line(document: NormalizedDocument, line_number: int) -> Tuple[Optional[str], Optional[str]]:
+    current: Tuple[Optional[str], Optional[str]] = (None, None)
     for level, title, line in document.headings:
         if line > line_number:
             break

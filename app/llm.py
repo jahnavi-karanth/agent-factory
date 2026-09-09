@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Protocol
+from typing import Any, Dict, Optional, Protocol
 from urllib import error, request
 
 from .parser import NormalizedDocument
@@ -13,7 +13,7 @@ class ExtractionError(RuntimeError):
 
 
 class RequirementExtractor(Protocol):
-    def extract(self, document: NormalizedDocument) -> dict[str, Any]: ...
+    def extract(self, document: NormalizedDocument) -> Dict[str, Any]: ...
 
 
 EXTRACTION_SCHEMA = {
@@ -28,13 +28,13 @@ EXTRACTION_SCHEMA = {
 
 
 class GeminiExtractor:
-    def __init__(self, api_key: str | None = None, model: str | None = None, timeout: float = 60.0, max_retries: int = 1):
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, timeout: float = 60.0, max_retries: int = 1):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
         self.timeout = timeout
         self.max_retries = max_retries
 
-    def extract(self, document: NormalizedDocument) -> dict[str, Any]:
+    def extract(self, document: NormalizedDocument) -> Dict[str, Any]:
         if not self.api_key:
             raise ExtractionError("GEMINI_API_KEY is not configured")
         prompt = self._build_prompt(document)
@@ -44,7 +44,7 @@ class GeminiExtractor:
             "generationConfig": {"responseMimeType": "application/json", "responseSchema": EXTRACTION_SCHEMA},
         }
         body = json.dumps(payload).encode("utf-8")
-        last_error: Exception | None = None
+        last_error: Optional[Exception] = None
         for _ in range(self.max_retries + 1):
             try:
                 req = request.Request(endpoint, data=body, headers={"Content-Type": "application/json"}, method="POST")

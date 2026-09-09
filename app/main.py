@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 
 
-def create_app(service: IngestionService | None = None) -> FastAPI:
+def create_app(service: Optional[IngestionService] = None) -> FastAPI:
     app = FastAPI(title="AI Software Development Factory", version="0.1.0", description="Milestone 1: generic BRD ingestion")
     ingestion = service or IngestionService()
 

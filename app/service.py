@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any
+from typing import Any, Dict, Optional
 
 from .llm import ExtractionError, GeminiExtractor, RequirementExtractor
 from .models import RequirementsModel
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class IngestionService:
-    def __init__(self, extractor: RequirementExtractor | None = None):
+    def __init__(self, extractor: Optional[RequirementExtractor] = None):
         self.extractor = extractor or GeminiExtractor()
 
     def ingest(self, document: NormalizedDocument) -> RequirementsModel:
@@ -29,7 +29,7 @@ class IngestionService:
         return model
 
     @staticmethod
-    def _validate_and_enrich(raw: dict[str, Any], document: NormalizedDocument) -> RequirementsModel:
+    def _validate_and_enrich(raw: Dict[str, Any], document: NormalizedDocument) -> RequirementsModel:
         payload = dict(raw)
         payload["brd_id"] = payload.get("brd_id") or f"BRD-{hashlib.sha256(document.text.encode()).hexdigest()[:12].upper()}"
         payload["source_filename"] = document.filename
