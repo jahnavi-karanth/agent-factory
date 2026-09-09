@@ -15,8 +15,39 @@ ANALYSIS_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "required": ["issues", "clarification_questions"],
     "properties": {
-        "issues": {"type": "array", "items": {"type": "object"}},
-        "clarification_questions": {"type": "array", "items": {"type": "object"}},
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["issue_id", "type", "severity", "title", "description", "affected_requirements", "reason", "clarification_required", "severity_reason"],
+                "properties": {
+                    "issue_id": {"type": "string"},
+                    "type": {"type": "string", "enum": ["ambiguity", "gap", "conflict", "inconsistency"]},
+                    "severity": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "affected_requirements": {"type": "array", "items": {"type": "string"}},
+                    "reason": {"type": "string"},
+                    "clarification_required": {"type": "boolean"},
+                    "severity_reason": {"type": "string"},
+                },
+            },
+        },
+        "clarification_questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["question_id", "issue_id", "affected_requirements", "question", "reason", "priority"],
+                "properties": {
+                    "question_id": {"type": "string"},
+                    "issue_id": {"type": "string"},
+                    "affected_requirements": {"type": "array", "items": {"type": "string"}},
+                    "question": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "priority": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]},
+                },
+            },
+        },
     },
 }
 

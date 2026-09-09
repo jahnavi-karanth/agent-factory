@@ -129,6 +129,17 @@ def test_malformed_analysis_is_rejected():
         pass
 
 
+def test_empty_issue_object_is_rejected():
+    class EmptyIssueExtractor:
+        def generate_json(self, prompt, schema):
+            return {"issues": [{}], "clarification_questions": []}
+    try:
+        RequirementsAnalyzer(EmptyIssueExtractor()).analyze(requirements_model())
+        raise AssertionError("expected empty issue failure")
+    except ExtractionError as exc:
+        assert "issue_id" in str(exc)
+
+
 def test_analysis_provider_failure_is_propagated():
     class BrokenExtractor:
         def generate_json(self, prompt, schema):
