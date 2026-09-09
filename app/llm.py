@@ -66,7 +66,7 @@ EXTRACTION_SCHEMA = {
 class GeminiExtractor:
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, timeout: Optional[float] = None, max_retries: Optional[int] = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        self.model = model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
         self.timeout = timeout if timeout is not None else float(os.getenv("GEMINI_TIMEOUT_SECONDS", "180"))
         self.max_retries = max_retries if max_retries is not None else int(os.getenv("GEMINI_MAX_RETRIES", "1"))
 
