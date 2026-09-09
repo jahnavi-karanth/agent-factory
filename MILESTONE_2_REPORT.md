@@ -4,7 +4,7 @@
 
 Implemented on branch `milestone-2-requirements-analysis`.
 
-Milestone 2 consumes the validated Milestone 1 Requirements Model directly. It does not re-parse the BRD, create a database, accept human answers, modify requirements, or implement any later milestone.
+Milestone 2 consumes the validated Milestone 1 Requirements Model from the SQLite repository by `brd_id`. It does not re-parse the BRD, accept human answers, modify requirements, or implement any later milestone. The complete-model request format remains available for compatibility.
 
 ## Architecture
 
@@ -12,7 +12,10 @@ Milestone 2 consumes the validated Milestone 1 Requirements Model directly. It d
 Milestone 1 Requirements Model
               |
               v
-POST /api/requirements/analyze
+SQLite repository
+              |
+              v
+POST /api/requirements/analyze {"brd_id":"..."}
               |
               v
 RequirementsAnalyzer
@@ -51,6 +54,8 @@ The response includes:
 - structured issues
 - clarification questions
 - affected requirement IDs
+
+Analysis results, issues, questions, and their relationships are persisted atomically in SQLite and can be retrieved with `GET /api/analysis/{analysis_id}`.
 
 ## Analysis behavior
 

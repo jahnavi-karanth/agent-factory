@@ -35,6 +35,7 @@ class ClarificationQuestion(BaseModel):
     question: str = Field(min_length=1)
     reason: str = Field(min_length=1)
     priority: Severity
+    status: Literal["PENDING"] = "PENDING"
 
 
 class AnalysisSummary(BaseModel):
