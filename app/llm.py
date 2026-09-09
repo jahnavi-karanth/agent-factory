@@ -23,7 +23,42 @@ EXTRACTION_SCHEMA = {
         "requirements", "non_functional_requirements", "business_rules", "constraints",
         "assumptions", "data_requirements", "external_dependencies", "success_criteria",
     ],
-    "properties": {"requirements": {"type": "array"}},
+    "properties": {
+        "title": {"type": "string"},
+        "business_problem": {"type": "string"},
+        "business_objectives": {"type": "array", "items": {"type": "string"}},
+        "stakeholders": {"type": "array", "items": {"type": "string"}},
+        "user_roles": {"type": "array", "items": {"type": "string"}},
+        "requirements": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["id", "type", "description", "source", "priority"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "type": {"type": "string"},
+                    "description": {"type": "string"},
+                    "source": {
+                        "type": "object",
+                        "properties": {
+                            "section": {"type": "string"},
+                            "title": {"type": "string"},
+                            "line_start": {"type": "integer"},
+                            "line_end": {"type": "integer"},
+                        },
+                    },
+                    "priority": {"type": "string"},
+                },
+            },
+        },
+        "non_functional_requirements": {"type": "array", "items": {"type": "string"}},
+        "business_rules": {"type": "array", "items": {"type": "string"}},
+        "constraints": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "data_requirements": {"type": "array", "items": {"type": "string"}},
+        "external_dependencies": {"type": "array", "items": {"type": "string"}},
+        "success_criteria": {"type": "array", "items": {"type": "string"}},
+    },
 }
 
 
@@ -55,7 +90,10 @@ class GeminiExtractor:
                 if not isinstance(parsed, dict):
                     raise ValueError("Gemini returned a non-object JSON value")
                 return parsed
-            except (error.URLError, error.HTTPError, TimeoutError, KeyError, IndexError, json.JSONDecodeError, ValueError) as exc:
+            except error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")[:500]
+                last_error = RuntimeError(f"Gemini HTTP {exc.code}: {error_body}")
+            except (error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
         raise ExtractionError(f"Gemini extraction failed after bounded retries: {last_error}") from last_error
 
