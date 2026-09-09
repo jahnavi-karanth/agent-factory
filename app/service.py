@@ -31,6 +31,7 @@ class IngestionService:
     @staticmethod
     def _validate_and_enrich(raw: Dict[str, Any], document: NormalizedDocument) -> RequirementsModel:
         payload = dict(raw)
+        payload["requirements"] = [IngestionService._normalize_requirement(item) for item in payload.get("requirements", [])]
         payload["brd_id"] = payload.get("brd_id") or f"BRD-{hashlib.sha256(document.text.encode()).hexdigest()[:12].upper()}"
         payload["source_filename"] = document.filename
         payload.setdefault("extraction_metadata", {})
@@ -39,3 +40,20 @@ class IngestionService:
             return RequirementsModel.model_validate(payload)
         except Exception as exc:
             raise ExtractionError(f"invalid Requirements Model from extractor: {exc}") from exc
+
+    @staticmethod
+    def _normalize_requirement(requirement: Any) -> Any:
+        """Normalize harmless presentation differences without inventing content."""
+        if not isinstance(requirement, dict) or not isinstance(requirement.get("type"), str):
+            return requirement
+        normalized = dict(requirement)
+        label = requirement["type"].strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "functional_requirement": "functional",
+            "nonfunctional": "non_functional",
+            "non_functional_requirement": "non_functional",
+            "businessrule": "business_rule",
+            "business_rule_requirement": "business_rule",
+        }
+        normalized["type"] = aliases.get(label, label)
+        return normalized
