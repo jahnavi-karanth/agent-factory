@@ -44,7 +44,7 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set `GEMINI_API_KEY` in `.env` or in the process environment. The key is never stored in source code or logged. Optional variables are `GEMINI_MODEL`, `MAX_UPLOAD_BYTES`, and `LOG_LEVEL`.
+Set `GEMINI_API_KEY` in `.env` or in the process environment. The key is never stored in source code or logged. Optional variables are `GEMINI_MODEL`, `GEMINI_TIMEOUT_SECONDS` (default `180`), `GEMINI_MAX_RETRIES` (default `1`), `MAX_UPLOAD_BYTES`, and `LOG_LEVEL`. For interactive BRD ingestion, use a fast, valid Gemini Flash model; a slower model may require increasing `GEMINI_TIMEOUT_SECONDS`.
 
 ## Run the application
 

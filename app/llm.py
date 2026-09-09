@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from typing import Any, Dict, Optional, Protocol
 from urllib import error, request
 
@@ -63,11 +64,11 @@ EXTRACTION_SCHEMA = {
 
 
 class GeminiExtractor:
-    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, timeout: float = 60.0, max_retries: int = 1):
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, timeout: Optional[float] = None, max_retries: Optional[int] = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-        self.timeout = timeout
-        self.max_retries = max_retries
+        self.timeout = timeout if timeout is not None else float(os.getenv("GEMINI_TIMEOUT_SECONDS", "180"))
+        self.max_retries = max_retries if max_retries is not None else int(os.getenv("GEMINI_MAX_RETRIES", "1"))
 
     def extract(self, document: NormalizedDocument) -> Dict[str, Any]:
         if not self.api_key:
@@ -93,7 +94,7 @@ class GeminiExtractor:
             except error.HTTPError as exc:
                 error_body = exc.read().decode("utf-8", errors="replace")[:500]
                 last_error = RuntimeError(f"Gemini HTTP {exc.code}: {error_body}")
-            except (error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError, ValueError) as exc:
+            except (error.URLError, socket.timeout, TimeoutError, KeyError, IndexError, json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
         raise ExtractionError(f"Gemini extraction failed after bounded retries: {last_error}") from last_error
 

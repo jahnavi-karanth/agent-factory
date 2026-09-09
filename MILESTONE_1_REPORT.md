@@ -47,6 +47,8 @@ python -m pip install -r requirements.txt
 python -m uvicorn app.main:app --reload
 ```
 
+Gemini settings can be adjusted in `.env`: `GEMINI_MODEL`, `GEMINI_TIMEOUT_SECONDS` (default `180`), and `GEMINI_MAX_RETRIES` (default `1`). Use a fast, valid Flash model for interactive ingestion.
+
 OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
 
 ## Upload a BRD
