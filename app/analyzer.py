@@ -63,7 +63,8 @@ class RequirementsAnalyzer:
         if not raw:
             raise ExtractionError("the analysis extractor returned an empty response")
         payload = dict(raw)
-        payload["clarification_questions"] = [self._normalize_question(item) for item in payload.get("clarification_questions", [])]
+        payload["issues"] = [normalized for item in self._as_list(payload.get("issues")) if (normalized := self._normalize_issue(item)) is not None]
+        payload["clarification_questions"] = [normalized for item in self._as_list(payload.get("clarification_questions")) if (normalized := self._normalize_question(item)) is not None]
         payload.update({
             "brd_id": requirements.brd_id,
             "analysis_id": self._analysis_id(requirements),
@@ -79,14 +80,62 @@ class RequirementsAnalyzer:
         return result
 
     @staticmethod
-    def _normalize_question(question: Any) -> Any:
+    def _as_list(value: Any) -> list:
+        return value if isinstance(value, list) else []
+
+    @staticmethod
+    def _normalize_issue(issue: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(issue, dict):
+            return None
+        normalized = dict(issue)
+        if not any(value not in (None, "", [], {}) for value in normalized.values()):
+            return None
+        normalized["issue_id"] = normalized.get("issue_id") or normalized.get("issueId") or normalized.get("id")
+        raw_type = normalized.get("type") or normalized.get("issue_type") or "gap"
+        type_key = str(raw_type).strip().lower().replace("-", "_").replace(" ", "_")
+        type_aliases = {"missing": "gap", "missing_information": "gap", "contradiction": "conflict", "inconsistency": "inconsistency", "ambiguous": "ambiguity"}
+        normalized["type"] = type_aliases.get(type_key, type_key)
+        normalized["severity"] = str(normalized.get("severity") or "MEDIUM").strip().upper()
+        normalized["title"] = normalized.get("title") or normalized.get("name") or "Requirement analysis issue"
+        normalized["description"] = normalized.get("description") or normalized.get("details") or normalized["title"]
+        normalized["reason"] = normalized.get("reason") or normalized.get("rationale") or normalized["description"]
+        normalized["severity_reason"] = normalized.get("severity_reason") or normalized["reason"]
+        normalized["affected_requirements"] = RequirementsAnalyzer._requirements_list(normalized.get("affected_requirements", normalized.get("affectedRequirements", [])))
+        normalized["clarification_required"] = bool(normalized.get("clarification_required", normalized.get("clarificationRequired", True)))
+        if isinstance(normalized.get("issue_id"), str):
+            issue_id = normalized["issue_id"].upper()
+            if issue_id.startswith("ISS-"):
+                prefix = {"ambiguity": "AMB", "gap": "GAP", "conflict": "CON", "inconsistency": "INC"}.get(normalized["type"], "GAP")
+                normalized["issue_id"] = prefix + issue_id[3:]
+        return {key: normalized[key] for key in ("issue_id", "type", "severity", "title", "description", "affected_requirements", "reason", "clarification_required", "severity_reason")}
+
+    @staticmethod
+    def _requirements_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+    @staticmethod
+    def _normalize_question(question: Any) -> Optional[Dict[str, Any]]:
         if not isinstance(question, dict):
-            return question
+            return None
         normalized = dict(question)
+        if not any(value not in (None, "", [], {}) for value in normalized.values()):
+            return None
+        normalized["question_id"] = normalized.get("question_id") or normalized.get("questionId") or normalized.get("id")
         question_id = normalized.get("question_id")
-        if isinstance(question_id, str) and question_id.upper().startswith("QST-"):
-            normalized["question_id"] = "Q-" + question_id[4:]
-        return normalized
+        if isinstance(question_id, str):
+            upper_id = question_id.upper()
+            if upper_id.startswith("QST-"):
+                normalized["question_id"] = "Q-" + question_id[4:]
+            elif upper_id.startswith("QUESTION-"):
+                normalized["question_id"] = "Q-" + question_id[9:]
+        normalized["issue_id"] = normalized.get("issue_id") or normalized.get("issueId") or ""
+        normalized["affected_requirements"] = RequirementsAnalyzer._requirements_list(normalized.get("affected_requirements", normalized.get("affectedRequirements", [])))
+        normalized["question"] = normalized.get("question") or normalized.get("clarification_question") or normalized.get("text") or "What clarification is required for this issue?"
+        normalized["reason"] = normalized.get("reason") or normalized.get("rationale") or "The Requirements Model does not resolve this issue."
+        normalized["priority"] = str(normalized.get("priority") or "MEDIUM").strip().upper()
+        return {key: normalized[key] for key in ("question_id", "issue_id", "affected_requirements", "question", "reason", "priority")}
 
     @staticmethod
     def _analysis_id(requirements: RequirementsModel) -> str:

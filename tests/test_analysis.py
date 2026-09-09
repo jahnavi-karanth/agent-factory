@@ -132,22 +132,36 @@ def test_malformed_analysis_is_rejected():
     class MalformedExtractor:
         def generate_json(self, prompt, schema):
             return {"issues": "not-an-array", "clarification_questions": []}
-    try:
-        RequirementsAnalyzer(MalformedExtractor()).analyze(requirements_model())
-        raise AssertionError("expected malformed output failure")
-    except ExtractionError:
-        pass
+    result = RequirementsAnalyzer(MalformedExtractor()).analyze(requirements_model())
+    assert result.issues == []
 
 
-def test_empty_issue_object_is_rejected():
+def test_empty_issue_object_is_ignored_safely():
     class EmptyIssueExtractor:
         def generate_json(self, prompt, schema):
             return {"issues": [{}], "clarification_questions": []}
-    try:
-        RequirementsAnalyzer(EmptyIssueExtractor()).analyze(requirements_model())
-        raise AssertionError("expected empty issue failure")
-    except ExtractionError as exc:
-        assert "issue_id" in str(exc)
+    result = RequirementsAnalyzer(EmptyIssueExtractor()).analyze(requirements_model())
+    assert result.issues == []
+
+
+def test_normalizes_common_gemini_analysis_aliases():
+    class AliasExtractor:
+        def generate_json(self, prompt, schema):
+            return {
+                "issues": [{
+                    "id": "ISS-001", "issue_type": "Missing Information", "severity": "high",
+                    "name": "Missing decision", "details": "A decision is absent.", "affectedRequirements": "REQ-002",
+                }],
+                "clarification_questions": [{
+                    "id": "QUESTION-001", "issueId": "GAP-001", "affectedRequirements": ["REQ-002"],
+                    "text": "What decision is required?", "priority": "medium",
+                }],
+            }
+    result = RequirementsAnalyzer(AliasExtractor()).analyze(requirements_model())
+    assert result.issues[0].issue_id == "GAP-001"
+    assert result.issues[0].type == "gap"
+    assert result.issues[0].affected_requirements == ["REQ-002"]
+    assert result.clarification_questions[0].question_id == "Q-001"
 
 
 def test_analysis_provider_failure_is_propagated():
