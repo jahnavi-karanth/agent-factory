@@ -67,18 +67,20 @@ EXTRACTION_SCHEMA = {
 class GeminiExtractor:
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, timeout: Optional[float] = None, max_retries: Optional[int] = None, fallback_model: Optional[str] = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        self.model = model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-        self.fallback_model = fallback_model if fallback_model is not None else os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite")
+        self.model = model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+        self.fallback_model = fallback_model if fallback_model is not None else os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
         self.timeout = timeout if timeout is not None else float(os.getenv("GEMINI_TIMEOUT_SECONDS", "180"))
         self.max_retries = max_retries if max_retries is not None else int(os.getenv("GEMINI_MAX_RETRIES", "2"))
 
     def extract(self, document: NormalizedDocument) -> Dict[str, Any]:
+        return self.generate_json(self._build_prompt(document), EXTRACTION_SCHEMA)
+
+    def generate_json(self, prompt: str, schema: Dict[str, Any]) -> Dict[str, Any]:
         if not self.api_key:
             raise ExtractionError("GEMINI_API_KEY is not configured")
-        prompt = self._build_prompt(document)
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json", "responseSchema": EXTRACTION_SCHEMA},
+            "generationConfig": {"responseMimeType": "application/json", "responseSchema": schema},
         }
         body = json.dumps(payload).encode("utf-8")
         last_error: Optional[Exception] = None
