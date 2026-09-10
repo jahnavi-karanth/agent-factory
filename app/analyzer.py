@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from .analysis_models import RequirementsAnalysis
@@ -65,6 +66,23 @@ class RequirementsAnalyzer:
         payload = dict(raw)
         payload["issues"] = [normalized for item in self._as_list(payload.get("issues")) if (normalized := self._normalize_issue(item)) is not None]
         payload["clarification_questions"] = [normalized for item in self._as_list(payload.get("clarification_questions")) if (normalized := self._normalize_question(item)) is not None]
+        max_questions = int(os.getenv("MAX_CLARIFICATION_QUESTIONS", "20"))
+        if not requirements.requirements:
+            payload["quality_status"] = "INVALID"
+            payload["status_reason"] = "The Requirements Model contains no meaningful requirements."
+            payload["blocking_issues"] = []
+        elif len(payload["clarification_questions"]) > max_questions:
+            payload["quality_status"] = "NEEDS_REWORK"
+            payload["status_reason"] = f"The analysis produced more than the configured maximum of {max_questions} clarification questions."
+            payload["blocking_issues"] = [item.get("issue_id", "") for item in payload["issues"]]
+        elif any(item.get("severity") == "CRITICAL" for item in payload["issues"]):
+            payload["quality_status"] = "NEEDS_REWORK"
+            payload["status_reason"] = "The analysis contains a critical unresolved issue that requires BRD rework before clarification."
+            payload["blocking_issues"] = [item.get("issue_id", "") for item in payload["issues"] if item.get("severity") == "CRITICAL"]
+        elif any(item.get("severity") in {"HIGH", "CRITICAL"} and item.get("clarification_required") for item in payload["issues"]):
+            payload["quality_status"] = "READY_FOR_CLARIFICATION"
+        else:
+            payload["quality_status"] = "READY" if not payload["clarification_questions"] else "READY_FOR_CLARIFICATION"
         payload.update({
             "brd_id": requirements.brd_id,
             "analysis_id": self._analysis_id(requirements),

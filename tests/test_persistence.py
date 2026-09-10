@@ -102,3 +102,16 @@ def test_missing_artifact_returns_not_found(tmp_path):
     client = TestClient(make_app(tmp_path / "missing.sqlite3"))
     assert client.get("/api/brd/BRD-MISSING/requirements").status_code == 404
     assert client.get("/api/analysis/ANALYSIS-MISSING").status_code == 404
+
+
+def test_repeated_upload_preserves_versions_and_latest_retrieval(tmp_path):
+    db_path = tmp_path / "versions.sqlite3"
+    app = make_app(db_path)
+    client = TestClient(app)
+    files = {"file": ("same.md", b"# Same", "text/markdown")}
+    first = client.post("/api/brd/upload", files=files).json()
+    second = client.post("/api/brd/upload", files=files).json()
+    assert first["brd_id"] == second["brd_id"]
+    db = __import__("sqlite3").connect(db_path)
+    assert db.execute("select count(*) from requirements_models where brd_id=?", (first["brd_id"],)).fetchone()[0] == 2
+    assert db.execute("select count(*) from brd_versions where brd_id=?", (first["brd_id"],)).fetchone()[0] == 2

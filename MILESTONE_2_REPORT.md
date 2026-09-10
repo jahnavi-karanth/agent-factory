@@ -114,7 +114,7 @@ The user manually validated the live Milestone 1 BRD 1 upload and received a Req
 - `tests/test_analysis.py` — Milestone 2 tests.
 - `README.md` — API and severity documentation.
 
-## Explicitly not implemented
+## Scope at the time of the Milestone 2 report
 
 - Human answer submission or resolution.
 - Requirements mutation after answers.
@@ -122,4 +122,4 @@ The user manually validated the live Milestone 1 BRD 1 upload and received a Req
 - Embeddings or pattern selection.
 - Architecture generation.
 - Code generation.
-- Any Milestone 3 functionality.
+- Milestone 3 functionality was not implemented at the time this report was written. The current repository subsequently adds the bounded HITL persistence/WebSocket layer described in `README.md`.

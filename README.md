@@ -159,7 +159,7 @@ The database is recreated automatically at the next application start. Do not re
 
 ## Milestone 2: Requirements Analysis and Clarification Questions
 
-Milestone 2 consumes the validated Milestone 1 Requirements Model directly. It does not re-parse the original BRD and does not require a database. It asks Gemini to identify only meaningful ambiguity, gaps, conflicts, and inconsistencies, then validates all issue and question references deterministically.
+Milestone 2 consumes the validated Milestone 1 Requirements Model from SQLite by `brd_id`. It does not re-parse the original BRD. It asks Gemini to identify only meaningful ambiguity, gaps, conflicts, and inconsistencies, then validates all issue and question references deterministically.
 
 ### Analyze a Requirements Model
 
@@ -188,3 +188,90 @@ Issue severity uses this vocabulary:
 | `CRITICAL` | Could fundamentally change the design or make implementation incorrect |
 
 Milestone 2 does not accept human answers or modify requirements. Human answer resolution belongs to a later milestone.
+
+## Milestone 3: Human-in-the-Loop clarification
+
+Milestone 3 is limited to business clarification and resolution. It does not implement RAG, Pattern KB retrieval, architecture generation, code generation, or testing agents.
+
+### Database migrations
+
+The project uses Alembic for reproducible SQLite schema creation. On a fresh clone:
+
+```bash
+python -m pip install -r requirements.txt
+alembic upgrade head
+```
+
+The default database is `data/agent_factory.sqlite3`. Set `DATABASE_PATH` to use another SQLite file. The migration is safe for an existing database created by the earlier persistence layer: it preserves existing rows and adds the new versioning, audit, and HITL tables.
+
+The application still initializes missing tables defensively for compatibility with older development databases; Alembic is the authoritative schema setup for clean environments.
+
+### BRD quality statuses
+
+M2 exposes `quality_status` in addition to its analysis status:
+
+| Status | Meaning | HITL allowed? |
+|---|---|---:|
+| `INVALID` | The input is not meaningfully usable as a BRD. | No |
+| `NEEDS_REWORK` | The BRD is recognizable but too incomplete or contradictory to proceed safely. | No |
+| `READY_FOR_CLARIFICATION` | The BRD is usable and has bounded answerable questions. | Yes |
+| `READY` | No meaningful clarification is required. | No |
+
+The backend applies the status from validated analysis results and the configured question limit. It does not invent business decisions.
+
+### Clarification safeguards
+
+Configure these in `.env`:
+
+```env
+MAX_CLARIFICATION_QUESTIONS=20
+MAX_FOLLOW_UP_ROUNDS=2
+```
+
+The question limit is a safety ceiling, not a target. The current implementation persists follow-up-round state and does not automatically rerun the full M2 analysis after each answer.
+
+### HITL API and WebSocket
+
+Create a session from a persisted M2 analysis:
+
+```text
+POST /api/hitl/session
+{"analysis_id":"ANALYSIS-..."}
+```
+
+A session is created only when the analysis is `READY_FOR_CLARIFICATION` and contains questions. Sessions are rejected for `INVALID`, `NEEDS_REWORK`, `READY`, or analyses with no questions.
+
+Retrieve a resumable session:
+
+```text
+GET /api/hitl/session/{session_id}
+```
+
+Connect to:
+
+```text
+/ws/hitl/{session_id}
+```
+
+The server sends structured messages such as:
+
+```json
+{"type":"question","question":{"question_id":"Q-001","question":"..."}}
+```
+
+Answer with:
+
+```json
+{"type":"answer","question_id":"Q-001","answer":"Managers approve expenses."}
+```
+
+The server acknowledges the answer, persists it, advances to the next unanswered question, and sends `completed` after all questions are answered. Disconnecting and reconnecting resumes from the first unanswered question. Completed clarification creates a new resolved Requirements Model version while preserving the original model.
+
+### Audit trail
+
+Meaningful business events are persisted in `audit_logs`, including BRD upload, Requirements Model creation, analysis start/completion, HITL session creation, question presentation, answer receipt/recording, completion, failures, and resolved-model creation. Secrets and API keys are never placed in audit metadata.
+
+## Current limitations
+
+- The initial status classifier is deterministic around validated M2 findings and configured limits; richer semantic BRD quality classification can be expanded later without changing the persistence or HITL interfaces.
+- Follow-up question generation is intentionally bounded and not automatically fabricated. Human answers are persisted as the source of truth and are attached to the resolved model metadata; the original Requirements Model is never overwritten.

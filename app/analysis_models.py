@@ -9,7 +9,7 @@ from .models import RequirementsModel
 
 IssueType = Literal["ambiguity", "gap", "conflict", "inconsistency"]
 Severity = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
-AnalysisStatus = Literal["no_issues", "clarification_required"]
+AnalysisStatus = Literal["no_issues", "clarification_required", "INVALID", "NEEDS_REWORK", "READY_FOR_CLARIFICATION", "READY"]
 
 
 class AnalysisIssue(BaseModel):
@@ -59,6 +59,9 @@ class RequirementsAnalysis(BaseModel):
     issues: List[AnalysisIssue] = Field(default_factory=list)
     clarification_questions: List[ClarificationQuestion] = Field(default_factory=list)
     extraction_metadata: Dict[str, str] = Field(default_factory=dict)
+    quality_status: Literal["INVALID", "NEEDS_REWORK", "READY_FOR_CLARIFICATION", "READY"] = "READY"
+    status_reason: Optional[str] = None
+    blocking_issues: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_references_and_summary(self) -> "RequirementsAnalysis":

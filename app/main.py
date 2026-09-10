@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -26,6 +26,10 @@ class AnalysisRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     brd_id: Optional[str] = None
+
+
+class HITLSessionRequest(BaseModel):
+    analysis_id: str
 
 
 def create_app(service: Optional[IngestionService] = None, analyzer: Optional[RequirementsAnalyzer] = None, repository: Optional[SQLiteRepository] = None) -> FastAPI:
@@ -51,6 +55,8 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
             logger.info("document parsing completed filename=%s", filename)
             model = ingestion.ingest(document)
             artifacts.save_requirements_model(model, document.text, os.path.splitext(filename)[1].lower() or "text")
+            artifacts.audit("BRD_UPLOADED", "brd", model.brd_id, details={"filename": filename})
+            artifacts.audit("REQUIREMENTS_MODEL_CREATED", "requirements_model", model.brd_id, details={"requirement_count": len(model.requirements)})
             return model
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -71,7 +77,10 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
                 model_version_id = artifacts.save_requirements_model(requirements, "", "model")
             logger.info("requirements analysis requested brd_id=%s", requirements.brd_id)
             analysis = requirements_analyzer.analyze(requirements)
-            return artifacts.save_analysis(analysis, model_version_id)
+            artifacts.audit("ANALYSIS_STARTED", "brd", requirements.brd_id)
+            saved = artifacts.save_analysis(analysis, model_version_id)
+            artifacts.audit("ANALYSIS_COMPLETED", "analysis", saved.analysis_id, details={"quality_status": saved.quality_status})
+            return saved
         except PersistenceError as exc:
             logger.exception("persistence failed during requirements analysis")
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -97,6 +106,58 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
         except PersistenceError as exc:
             status = 404 if "no persisted" in str(exc) else 503
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.post("/api/hitl/session")
+    async def create_hitl_session(request: HITLSessionRequest) -> Dict[str, Any]:
+        try:
+            analysis = artifacts.get_analysis(request.analysis_id)
+            if analysis.quality_status != "READY_FOR_CLARIFICATION" or not analysis.clarification_questions:
+                raise HTTPException(status_code=409, detail="HITL is allowed only for READY_FOR_CLARIFICATION analyses with questions")
+            return artifacts.create_hitl_session(request.analysis_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/hitl/session/{session_id}")
+    async def get_hitl_session(session_id: str) -> Dict[str, Any]:
+        try:
+            return artifacts.get_hitl_session(session_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.websocket("/ws/hitl/{session_id}")
+    async def hitl_websocket(websocket: WebSocket, session_id: str) -> None:
+        await websocket.accept()
+        try:
+            state = artifacts.get_hitl_session(session_id)
+            await websocket.send_json({"type": "resumed", "session_id": session_id, "status": state["status"]})
+            while state["status"] != "COMPLETED":
+                state = artifacts.get_hitl_session(session_id)
+                answered = {item["question_id"] for item in state["answers"]}
+                question = next((item for item in state["questions"] if item["question_id"] not in answered), None)
+                if question is None:
+                    break
+                await websocket.send_json({"type": "question", "question": question})
+                artifacts.audit("HITL_QUESTION_PRESENTED", "hitl_session", session_id, details={"question_id": question["question_id"]})
+                message = await websocket.receive_json()
+                if message.get("type") != "answer" or message.get("question_id") != question["question_id"]:
+                    await websocket.send_json({"type": "error", "detail": "Expected an answer for the currently presented question."})
+                    continue
+                artifacts.audit("HITL_ANSWER_RECEIVED", "hitl_session", session_id, details={"question_id": question["question_id"]})
+                state = artifacts.record_answer(session_id, question["question_id"], str(message.get("answer", "")))
+                await websocket.send_json({"type": "answer_acknowledged", "question_id": question["question_id"]})
+            await websocket.send_json({"type": "completed", "session_id": session_id})
+        except WebSocketDisconnect:
+            try:
+                artifacts.audit("HITL_SESSION_RESUMED", "hitl_session", session_id, result="DISCONNECTED")
+            except Exception:
+                logger.exception("failed to audit HITL disconnect")
+        except Exception as exc:
+            logger.exception("HITL websocket failed")
+            await websocket.send_json({"type": "error", "detail": str(exc)})
+            try:
+                artifacts.audit("HITL_SESSION_FAILED", "hitl_session", session_id, result="FAILED", details={"reason": str(exc)})
+            except Exception:
+                logger.exception("failed to audit HITL failure")
 
     @app.exception_handler(HTTPException)
     async def http_error_handler(_, exc: HTTPException) -> JSONResponse:
