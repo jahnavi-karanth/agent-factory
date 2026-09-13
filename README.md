@@ -228,7 +228,7 @@ MAX_CLARIFICATION_QUESTIONS=20
 MAX_FOLLOW_UP_ROUNDS=2
 ```
 
-The question limit is a safety ceiling, not a target. The current implementation persists follow-up-round state and does not automatically rerun the full M2 analysis after each answer.
+The question limit is a safety ceiling, not a target. Follow-up generation evaluates the persisted Requirements Model, original analysis, and human answers without rerunning the full M2 analysis. Follow-up rounds are persisted and bounded by `MAX_FOLLOW_UP_ROUNDS`.
 
 ### HITL API and WebSocket
 
@@ -265,7 +265,7 @@ Answer with:
 {"type":"answer","question_id":"Q-001","answer":"Managers approve expenses."}
 ```
 
-The server acknowledges the answer, persists it, advances to the next unanswered question, and sends `completed` after all questions are answered. Disconnecting and reconnecting resumes from the first unanswered question. Completed clarification creates a new resolved Requirements Model version while preserving the original model.
+The server acknowledges the answer, persists it, advances to the next unanswered question, and can create a bounded follow-up question when an answer reveals a genuine new ambiguity. Disconnecting and reconnecting resumes from the first unanswered question. Completed clarification creates a new resolved Requirements Model version while preserving the original model.
 
 ### Audit trail
 
@@ -274,4 +274,6 @@ Meaningful business events are persisted in `audit_logs`, including BRD upload, 
 ## Current limitations
 
 - The initial status classifier is deterministic around validated M2 findings and configured limits; richer semantic BRD quality classification can be expanded later without changing the persistence or HITL interfaces.
-- Follow-up question generation is intentionally bounded and not automatically fabricated. Human answers are persisted as the source of truth and are attached to the resolved model metadata; the original Requirements Model is never overwritten.
+- Follow-up question generation is intentionally bounded and never fabricated merely to use a round. Human answers are persisted as the source of truth and are attached to the resolved model metadata; the original Requirements Model is never overwritten.
+
+See `MILESTONE_3_TEST_GUIDE.md` for the complete Swagger, WebSocket, migration, audit, versioning, follow-up, reconnection, and edge-case test procedure.

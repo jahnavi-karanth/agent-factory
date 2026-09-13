@@ -97,6 +97,33 @@ class RequirementsAnalyzer:
         logger.info("requirements analysis completed brd_id=%s issues=%d", requirements.brd_id, len(result.issues))
         return result
 
+    def generate_follow_up_questions(self, requirements: RequirementsModel, analysis: RequirementsAnalysis, answers: list[dict], round_number: int) -> list[dict]:
+        if round_number > int(os.getenv("MAX_FOLLOW_UP_ROUNDS", "2")):
+            return []
+        schema = {
+            "type": "object",
+            "required": ["questions"],
+            "properties": {"questions": {"type": "array", "items": {"type": "object", "required": ["question_id", "issue_id", "question", "reason", "priority"], "properties": {"question_id": {"type": "string"}, "issue_id": {"type": "string"}, "question": {"type": "string"}, "reason": {"type": "string"}, "priority": {"type": "string"}}}}},
+        }
+        prompt = f"""Review only the persisted Requirements Model, the original analysis, and the human answers below. Determine whether the answers reveal a genuinely new, material business ambiguity. If not, return an empty questions array. Do not create questions merely to use a round. Do not invent decisions, technical solutions, thresholds, actors, or policies. Questions must be neutral and reference an existing issue_id. This is bounded follow-up round {round_number}. Return at most 5 questions and use IDs Q-{round_number:01d}01, Q-{round_number:01d}02, etc.\n\nMODEL:\n{requirements.model_dump_json()}\nANALYSIS:\n{analysis.model_dump_json()}\nANSWERS:\n{json.dumps(answers)}"""
+        raw = self.extractor.generate_json(prompt, schema)
+        result = []
+        issue_ids = {item.issue_id for item in analysis.issues}
+        existing_ids = {item.question_id for item in analysis.clarification_questions}
+        for index, item in enumerate(self._as_list(raw.get("questions") if isinstance(raw, dict) else []), start=1):
+            if not isinstance(item, dict):
+                continue
+            issue_id = item.get("issue_id") or ""
+            question = item.get("question") or ""
+            if issue_id not in issue_ids or not question:
+                continue
+            question_id = item.get("question_id") or f"Q-{round_number:01d}{index:02d}"
+            if question_id in existing_ids:
+                question_id = f"Q-{round_number:01d}{index:02d}"
+            affected = next((issue.affected_requirements for issue in analysis.issues if issue.issue_id == issue_id), [])
+            result.append({"question_id": question_id, "issue_id": issue_id, "affected_requirements": affected, "question": question, "reason": item.get("reason") or "The human answer revealed a new ambiguity.", "priority": str(item.get("priority") or "MEDIUM").upper(), "round": round_number})
+        return result
+
     @staticmethod
     def _as_list(value: Any) -> list:
         return value if isinstance(value, list) else []

@@ -166,6 +166,23 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     UNIQUE(session_id, question_id)
                 );
+                CREATE TABLE IF NOT EXISTS hitl_follow_up_questions (
+                    session_id TEXT NOT NULL REFERENCES hitl_sessions(session_id) ON DELETE CASCADE,
+                    question_id TEXT NOT NULL,
+                    issue_id TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    priority TEXT NOT NULL,
+                    round INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    PRIMARY KEY(session_id, question_id)
+                );
+                CREATE TABLE IF NOT EXISTS hitl_answer_requirements (
+                    session_id TEXT NOT NULL REFERENCES hitl_sessions(session_id) ON DELETE CASCADE,
+                    question_id TEXT NOT NULL,
+                    requirement_id TEXT NOT NULL,
+                    PRIMARY KEY(session_id, question_id, requirement_id)
+                );
                 CREATE TABLE IF NOT EXISTS resolved_requirements_models (
                     resolved_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT NOT NULL REFERENCES hitl_sessions(session_id),
@@ -218,6 +235,31 @@ class SQLiteRepository:
                 return RequirementsModel.model_validate_json(row["model_json"]), int(row["model_version_id"])
         except sqlite3.Error as exc:
             raise PersistenceError(f"requirements retrieval failed: {exc}") from exc
+
+    def list_brd_versions(self, brd_id: str) -> list[Dict[str, Any]]:
+        with self.connection() as db:
+            rows = db.execute("SELECT version_id,brd_id,version,parent_version_id,quality_status,status_reason,created_at FROM brd_versions WHERE brd_id=? ORDER BY version", (brd_id,)).fetchall()
+            if not rows:
+                raise PersistenceError(f"no persisted BRD versions found for brd_id {brd_id}")
+            return [dict(row) for row in rows]
+
+    def update_latest_quality_status(self, brd_id: str, status: str, reason: Optional[str] = None) -> None:
+        with self.connection() as db:
+            db.execute("UPDATE brd_versions SET quality_status=?,status_reason=? WHERE brd_id=? AND version=(SELECT MAX(version) FROM brd_versions WHERE brd_id=?)", (status, reason, brd_id, brd_id))
+            db.commit()
+
+    def list_audit(self, entity_type: Optional[str] = None, entity_id: Optional[str] = None) -> list[Dict[str, Any]]:
+        with self.connection() as db:
+            query = "SELECT id,timestamp,actor_type,actor_id,action,entity_type,entity_id,result,details_json,request_id FROM audit_logs WHERE 1=1"
+            args: list[Any] = []
+            if entity_type:
+                query += " AND entity_type=?"
+                args.append(entity_type)
+            if entity_id:
+                query += " AND entity_id=?"
+                args.append(entity_id)
+            query += " ORDER BY id"
+            return [dict(row) for row in db.execute(query, args).fetchall()]
 
     def save_analysis(self, analysis: RequirementsAnalysis, model_version_id: int) -> RequirementsAnalysis:
         now = utc_now()
@@ -311,11 +353,16 @@ class SQLiteRepository:
             row = db.execute("SELECT * FROM hitl_sessions WHERE session_id=?", (session_id,)).fetchone()
             if not row:
                 raise PersistenceError(f"no HITL session found for session_id {session_id}")
-            questions = db.execute("SELECT q.question_id,q.issue_id,q.question,q.reason,q.priority FROM clarification_questions q WHERE q.analysis_id=? ORDER BY q.rowid", (row["analysis_id"],)).fetchall()
+            questions = db.execute("SELECT q.question_id,q.issue_id,q.question,q.reason,q.priority FROM clarification_questions q WHERE q.analysis_id=? UNION ALL SELECT question_id,issue_id,question,reason,priority FROM hitl_follow_up_questions WHERE session_id=? ORDER BY question_id", (row["analysis_id"], session_id)).fetchall()
             answers = db.execute("SELECT question_id,answer,created_at FROM hitl_answers WHERE session_id=?", (session_id,)).fetchall()
             answered = {item["question_id"] for item in answers}
             next_question = next((dict(item) for item in questions if item["question_id"] not in answered), None)
-            return {"session_id": row["session_id"], "analysis_id": row["analysis_id"], "brd_id": row["brd_id"], "status": row["status"], "current_question_id": next_question["question_id"] if next_question else None, "follow_up_round": row["follow_up_round"], "questions": [dict(q) for q in questions], "answers": [dict(a) for a in answers]}
+            answer_payload = []
+            for answer in answers:
+                item = dict(answer)
+                item["affected_requirements"] = [r["requirement_id"] for r in db.execute("SELECT requirement_id FROM hitl_answer_requirements WHERE session_id=? AND question_id=? ORDER BY requirement_id", (session_id, answer["question_id"])).fetchall()]
+                answer_payload.append(item)
+            return {"session_id": row["session_id"], "analysis_id": row["analysis_id"], "brd_id": row["brd_id"], "status": row["status"], "current_question_id": next_question["question_id"] if next_question else None, "follow_up_round": row["follow_up_round"], "questions": [dict(q) for q in questions], "answers": answer_payload}
 
     def record_answer(self, session_id: str, question_id: str, answer: str) -> Dict[str, Any]:
         if not answer or not answer.strip():
@@ -325,23 +372,44 @@ class SQLiteRepository:
                 session = db.execute("SELECT * FROM hitl_sessions WHERE session_id=?", (session_id,)).fetchone()
                 if not session:
                     raise PersistenceError(f"no HITL session found for session_id {session_id}")
-                valid = db.execute("SELECT 1 FROM clarification_questions WHERE analysis_id=? AND question_id=?", (session["analysis_id"], question_id)).fetchone()
+                valid = db.execute("SELECT 1 FROM clarification_questions WHERE analysis_id=? AND question_id=? UNION SELECT 1 FROM hitl_follow_up_questions WHERE session_id=? AND question_id=?", (session["analysis_id"], question_id, session_id, question_id)).fetchone()
                 if not valid:
                     raise PersistenceError("question does not belong to this HITL session")
                 db.execute("INSERT OR IGNORE INTO hitl_answers(session_id,question_id,answer,created_at) VALUES(?,?,?,?)", (session_id, question_id, answer.strip(), utc_now()))
-                remaining = db.execute("SELECT q.question_id FROM clarification_questions q LEFT JOIN hitl_answers a ON a.session_id=? AND a.question_id=q.question_id WHERE q.analysis_id=? AND a.question_id IS NULL ORDER BY q.rowid LIMIT 1", (session_id, session["analysis_id"])).fetchone()
+                refs = db.execute("SELECT requirement_id FROM question_requirements q WHERE q.analysis_id=? AND q.question_id=? UNION SELECT requirement_id FROM issue_requirements i WHERE i.analysis_id=? AND i.issue_id=(SELECT issue_id FROM clarification_questions WHERE analysis_id=? AND question_id=?)", (session["analysis_id"], question_id, session["analysis_id"], session["analysis_id"], question_id)).fetchall()
+                for ref in refs:
+                    db.execute("INSERT OR IGNORE INTO hitl_answer_requirements(session_id,question_id,requirement_id) VALUES(?,?,?)", (session_id, question_id, ref["requirement_id"]))
+                remaining = db.execute("SELECT allq.question_id FROM (SELECT q.question_id FROM clarification_questions q WHERE q.analysis_id=? UNION ALL SELECT question_id FROM hitl_follow_up_questions WHERE session_id=?) allq LEFT JOIN hitl_answers a ON a.session_id=? AND a.question_id=allq.question_id WHERE a.question_id IS NULL ORDER BY allq.question_id LIMIT 1", (session["analysis_id"], session_id, session_id)).fetchone()
                 status = "ACTIVE" if remaining else "COMPLETED"
                 db.execute("UPDATE hitl_sessions SET status=?,current_question_id=?,updated_at=? WHERE session_id=?", (status, remaining["question_id"] if remaining else None, utc_now(), session_id))
                 db.commit()
             self.audit("HITL_ANSWER_RECORDED", "hitl_session", session_id, details={"question_id": question_id})
-            if status == "COMPLETED":
-                self.audit("HITL_SESSION_COMPLETED", "hitl_session", session_id)
-                self._create_resolved_model(session_id)
             return self.get_hitl_session(session_id)
         except sqlite3.Error as exc:
             raise PersistenceError(f"answer persistence failed: {exc}") from exc
 
-    def _create_resolved_model(self, session_id: str) -> None:
+    def add_follow_up_questions(self, session_id: str, questions: list[dict], round_number: int) -> Dict[str, Any]:
+        if not questions:
+            return self.get_hitl_session(session_id)
+        try:
+            with self.connection() as db:
+                row = db.execute("SELECT 1 FROM hitl_sessions WHERE session_id=?", (session_id,)).fetchone()
+                if not row:
+                    raise PersistenceError(f"no HITL session found for session_id {session_id}")
+                for item in questions:
+                    db.execute("INSERT OR IGNORE INTO hitl_follow_up_questions(session_id,question_id,issue_id,question,reason,priority,round) VALUES(?,?,?,?,?,?,?)", (session_id, item["question_id"], item["issue_id"], item["question"], item["reason"], item["priority"], round_number))
+                    for requirement_id in item.get("affected_requirements", []):
+                        db.execute("INSERT OR IGNORE INTO hitl_answer_requirements(session_id,question_id,requirement_id) VALUES(?,?,?)", (session_id, item["question_id"], requirement_id))
+                db.execute("UPDATE hitl_sessions SET status='ACTIVE',follow_up_round=?,current_question_id=?,updated_at=? WHERE session_id=?", (round_number, questions[0]["question_id"], utc_now(), session_id))
+                db.commit()
+            self.audit("FOLLOW_UP_ROUND_STARTED", "hitl_session", session_id, details={"round": round_number})
+            for item in questions:
+                self.audit("FOLLOW_UP_QUESTION_CREATED", "hitl_session", session_id, details={"round": round_number, "question_id": item["question_id"]})
+            return self.get_hitl_session(session_id)
+        except sqlite3.Error as exc:
+            raise PersistenceError(f"follow-up persistence failed: {exc}") from exc
+
+    def create_resolved_model(self, session_id: str) -> None:
         with self.connection() as db:
             session = db.execute("SELECT analysis_id,brd_id FROM hitl_sessions WHERE session_id=?", (session_id,)).fetchone()
             analysis = db.execute("SELECT model_version_id FROM analyses WHERE analysis_id=?", (session["analysis_id"],)).fetchone()

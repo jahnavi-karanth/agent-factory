@@ -79,6 +79,7 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
             analysis = requirements_analyzer.analyze(requirements)
             artifacts.audit("ANALYSIS_STARTED", "brd", requirements.brd_id)
             saved = artifacts.save_analysis(analysis, model_version_id)
+            artifacts.update_latest_quality_status(requirements.brd_id, saved.quality_status, saved.status_reason)
             artifacts.audit("ANALYSIS_COMPLETED", "analysis", saved.analysis_id, details={"quality_status": saved.quality_status})
             return saved
         except PersistenceError as exc:
@@ -98,6 +99,17 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
         except PersistenceError as exc:
             status = 404 if "no persisted" in str(exc) else 503
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.get("/api/brd/{brd_id}/versions")
+    async def get_brd_versions(brd_id: str) -> list[Dict[str, Any]]:
+        try:
+            return artifacts.list_brd_versions(brd_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/audit")
+    async def get_audit(entity_type: Optional[str] = None, entity_id: Optional[str] = None) -> list[Dict[str, Any]]:
+        return artifacts.list_audit(entity_type, entity_id)
 
     @app.get("/api/analysis/{analysis_id}", response_model=RequirementsAnalysis, responses={404: {"model": ErrorResponse}, 503: {"model": ErrorResponse}})
     async def get_analysis(analysis_id: str) -> RequirementsAnalysis:
@@ -145,6 +157,22 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
                 artifacts.audit("HITL_ANSWER_RECEIVED", "hitl_session", session_id, details={"question_id": question["question_id"]})
                 state = artifacts.record_answer(session_id, question["question_id"], str(message.get("answer", "")))
                 await websocket.send_json({"type": "answer_acknowledged", "question_id": question["question_id"]})
+                if state["status"] == "COMPLETED":
+                    analysis = artifacts.get_analysis(state["analysis_id"])
+                    requirements, _ = artifacts.get_requirements_model(state["brd_id"])
+                    round_number = int(state.get("follow_up_round", 0)) + 1
+                    answers = state["answers"]
+                    follow_ups = requirements_analyzer.generate_follow_up_questions(requirements, analysis, answers, round_number)
+                    max_rounds = int(os.getenv("MAX_FOLLOW_UP_ROUNDS", "2"))
+                    if follow_ups and round_number <= max_rounds:
+                        state = artifacts.add_follow_up_questions(session_id, follow_ups, round_number)
+                        continue
+                    if follow_ups and round_number > max_rounds:
+                        artifacts.audit("HITL_SESSION_FAILED", "hitl_session", session_id, result="NEEDS_REWORK", details={"reason": "Maximum follow-up rounds exceeded"})
+                        await websocket.send_json({"type": "error", "detail": "Maximum follow-up rounds exceeded; BRD needs rework."})
+                        break
+                    artifacts.create_resolved_model(session_id)
+                    artifacts.audit("HITL_SESSION_COMPLETED", "hitl_session", session_id)
             await websocket.send_json({"type": "completed", "session_id": session_id})
         except WebSocketDisconnect:
             try:

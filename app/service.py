@@ -33,7 +33,7 @@ class IngestionService:
     def _validate_and_enrich(raw: Dict[str, Any], document: NormalizedDocument) -> RequirementsModel:
         payload = dict(raw)
         payload["requirements"] = [IngestionService._normalize_requirement(item, document) for item in payload.get("requirements", [])]
-        payload["brd_id"] = payload.get("brd_id") or f"BRD-{hashlib.sha256(document.text.encode()).hexdigest()[:12].upper()}"
+        payload["brd_id"] = payload.get("brd_id") or f"BRD-{hashlib.sha256(document.filename.strip().lower().encode()).hexdigest()[:12].upper()}"
         payload["source_filename"] = document.filename
         payload.setdefault("extraction_metadata", {})
         payload["extraction_metadata"].update({"milestone": "1", "parser": "markdown", "provider": "gemini"})
