@@ -120,6 +120,8 @@ Answer the follow-up question. If no new ambiguity remains, the WebSocket sends 
 
 Repeat with a fixture/provider that generates new ambiguity twice. The second follow-up round may proceed when `MAX_FOLLOW_UP_ROUNDS=2`. A further generated round must return an error, audit `HITL_SESSION_FAILED` with a rework reason, and never create an endless loop.
 
+Answer-quality policy: an answer that is clearly irrelevant to the question, explicitly says `undecided`, `unknown`, `TBD`, or similar, or is too short to express a decision receives a targeted follow-up asking for a specific answer. A slightly vague but relevant answer may pass without another question. When the configured maximum is reached while the current answer is still unresolved, the analyzer returns an AI best-decision recommendation, persists it in `best_decisions`, emits a `best_decisions` WebSocket message, and completes rather than looping. Review the recommendation before treating it as an approved business decision.
+
 ## Case 9: Resolved model and traceability
 
 After all initial and follow-up questions are answered, call `GET /api/brd/{brd_id}/requirements`. The latest version must have `extraction_metadata.resolved: true` and the session ID. The original Requirements Model must remain available in the version history. Query SQLite to verify one row in `resolved_requirements_models` links the resolved model version to the source model version.

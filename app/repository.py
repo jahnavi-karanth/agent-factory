@@ -183,6 +183,14 @@ class SQLiteRepository:
                     requirement_id TEXT NOT NULL,
                     PRIMARY KEY(session_id, question_id, requirement_id)
                 );
+                CREATE TABLE IF NOT EXISTS hitl_best_decisions (
+                    session_id TEXT NOT NULL REFERENCES hitl_sessions(session_id) ON DELETE CASCADE,
+                    question_id TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(session_id, question_id)
+                );
                 CREATE TABLE IF NOT EXISTS resolved_requirements_models (
                     resolved_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT NOT NULL REFERENCES hitl_sessions(session_id),
@@ -362,7 +370,8 @@ class SQLiteRepository:
                 item = dict(answer)
                 item["affected_requirements"] = [r["requirement_id"] for r in db.execute("SELECT requirement_id FROM hitl_answer_requirements WHERE session_id=? AND question_id=? ORDER BY requirement_id", (session_id, answer["question_id"])).fetchall()]
                 answer_payload.append(item)
-            return {"session_id": row["session_id"], "analysis_id": row["analysis_id"], "brd_id": row["brd_id"], "status": row["status"], "current_question_id": next_question["question_id"] if next_question else None, "follow_up_round": row["follow_up_round"], "questions": [dict(q) for q in questions], "answers": answer_payload}
+            decisions = [dict(item) for item in db.execute("SELECT question_id,decision,reason,created_at FROM hitl_best_decisions WHERE session_id=? ORDER BY question_id", (session_id,)).fetchall()]
+            return {"session_id": row["session_id"], "analysis_id": row["analysis_id"], "brd_id": row["brd_id"], "status": row["status"], "current_question_id": next_question["question_id"] if next_question else None, "follow_up_round": row["follow_up_round"], "questions": [dict(q) for q in questions], "answers": answer_payload, "best_decisions": decisions}
 
     def record_answer(self, session_id: str, question_id: str, answer: str) -> Dict[str, Any]:
         if not answer or not answer.strip():
@@ -427,3 +436,13 @@ class SQLiteRepository:
             self.audit("RESOLVED_REQUIREMENTS_CREATED", "hitl_session", session_id, details={"source_model_version_id": analysis["model_version_id"], "resolved_model_version_id": new_version})
         except sqlite3.Error as exc:
             raise PersistenceError(f"resolved model persistence failed: {exc}") from exc
+
+    def save_best_decisions(self, session_id: str, decisions: list[dict]) -> None:
+        try:
+            with self.connection() as db:
+                for item in decisions:
+                    db.execute("INSERT OR REPLACE INTO hitl_best_decisions(session_id,question_id,decision,reason,created_at) VALUES(?,?,?,?,?)", (session_id, item["question_id"], item["decision"], item.get("reason") or "AI recommendation after the follow-up limit.", utc_now()))
+                db.commit()
+            self.audit("HITL_BEST_DECISIONS_RECORDED", "hitl_session", session_id, details={"count": len(decisions)})
+        except sqlite3.Error as exc:
+            raise PersistenceError(f"best-decision persistence failed: {exc}") from exc

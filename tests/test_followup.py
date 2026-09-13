@@ -35,7 +35,7 @@ def test_follow_up_round_is_generated_and_persisted(tmp_path):
         assert ws.receive_json()["type"] == "resumed"
         first = ws.receive_json()
         assert first["question"]["question_id"] == "Q-001"
-        ws.send_json({"type": "answer", "question_id": "Q-001", "answer": "Managers approve requests."})
+        ws.send_json({"type": "answer", "question_id": "Q-001", "answer": "Managers handle it."})
         assert ws.receive_json()["type"] == "answer_acknowledged"
         follow = ws.receive_json()
         assert follow["type"] == "question"

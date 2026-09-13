@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, Optional
 
 from .analysis_models import RequirementsAnalysis
@@ -106,7 +107,10 @@ class RequirementsAnalyzer:
             "properties": {"questions": {"type": "array", "items": {"type": "object", "required": ["question_id", "issue_id", "question", "reason", "priority"], "properties": {"question_id": {"type": "string"}, "issue_id": {"type": "string"}, "question": {"type": "string"}, "reason": {"type": "string"}, "priority": {"type": "string"}}}}},
         }
         prompt = f"""Review only the persisted Requirements Model, the original analysis, and the human answers below. Determine whether the answers reveal a genuinely new, material business ambiguity. If not, return an empty questions array. Do not create questions merely to use a round. Do not invent decisions, technical solutions, thresholds, actors, or policies. Questions must be neutral and reference an existing issue_id. This is bounded follow-up round {round_number}. Return at most 5 questions and use IDs Q-{round_number:01d}01, Q-{round_number:01d}02, etc.\n\nMODEL:\n{requirements.model_dump_json()}\nANALYSIS:\n{analysis.model_dump_json()}\nANSWERS:\n{json.dumps(answers)}"""
-        raw = self.extractor.generate_json(prompt, schema)
+        quality_flags = self._answer_quality_flags(answers)
+        if not quality_flags:
+            return []
+        raw = self.extractor.generate_json(prompt + f"\nANSWER QUALITY FLAGS:\n{json.dumps(quality_flags)}", schema)
         result = []
         issue_ids = {item.issue_id for item in analysis.issues}
         existing_ids = {item.question_id for item in analysis.clarification_questions}
@@ -122,7 +126,46 @@ class RequirementsAnalyzer:
                 question_id = f"Q-{round_number:01d}{index:02d}"
             affected = next((issue.affected_requirements for issue in analysis.issues if issue.issue_id == issue_id), [])
             result.append({"question_id": question_id, "issue_id": issue_id, "affected_requirements": affected, "question": question, "reason": item.get("reason") or "The human answer revealed a new ambiguity.", "priority": str(item.get("priority") or "MEDIUM").upper(), "round": round_number})
+        if not result:
+            question_lookup = {item.question_id: item for item in analysis.clarification_questions}
+            for index, flag in enumerate(quality_flags, start=1):
+                original = question_lookup.get(flag.get("question_id"))
+                issue_id = original.issue_id if original else (flag.get("issue_id") or "")
+                if not issue_id:
+                    continue
+                affected = original.affected_requirements if original else []
+                priority = original.priority if original else "MEDIUM"
+                question_text = original.question if original else flag.get("question", "the clarification question")
+                result.append({"question_id": f"Q-{round_number:01d}{index:02d}", "issue_id": issue_id, "affected_requirements": affected, "question": f"Please provide a specific, direct answer to the original question: {question_text} If this is undecided, say whether you want the AI to recommend the best option.", "reason": flag["reason"], "priority": priority, "round": round_number})
         return result
+
+    @staticmethod
+    def _answer_quality_flags(answers: list[dict]) -> list[dict]:
+        stop_words = {"the", "and", "for", "with", "what", "which", "should", "must", "are", "is", "be", "to", "of", "in", "on", "a", "an", "or", "users", "system"}
+        undecided = re.compile(r"\b(undecided|not decided|not determined|unknown|unsure|tbd|to be decided|no decision|not specified|i don't know)\b", re.I)
+        flags = []
+        for item in answers:
+            answer = str(item.get("answer", "")).strip()
+            question = str(item.get("question", ""))
+            answer_terms = {term[:4] for term in re.findall(r"[a-z]{4,}", answer.lower()) if term not in stop_words}
+            question_terms = {term[:4] for term in re.findall(r"[a-z]{4,}", question.lower()) if term not in stop_words}
+            overlap = len(answer_terms & question_terms) / max(1, min(len(question_terms), 5))
+            reason = None
+            if undecided.search(answer):
+                reason = "The answer explicitly leaves the requested decision undecided."
+            elif len(answer_terms) < 3:
+                reason = "The answer is too short to resolve the requested business decision."
+            elif question_terms and overlap == 0:
+                reason = "The answer does not address the key terms in the clarification question."
+            if reason:
+                flags.append({"question_id": item.get("question_id"), "issue_id": item.get("issue_id"), "question": question, "reason": reason})
+        return flags
+
+    def generate_best_decisions(self, requirements: RequirementsModel, analysis: RequirementsAnalysis, answers: list[dict]) -> list[dict]:
+        schema = {"type": "object", "required": ["decisions"], "properties": {"decisions": {"type": "array", "items": {"type": "object", "required": ["question_id", "decision", "reason"], "properties": {"question_id": {"type": "string"}, "decision": {"type": "string"}, "reason": {"type": "string"}}}}}}
+        prompt = f"""For each flagged unanswered or irrelevant clarification answer, choose the most practical conservative business decision using only the supplied Requirements Model and question context. Do not invent unsupported facts. Prefer a minimal reversible option and clearly label it as an AI recommendation requiring review. Return one decision per flagged question.\nMODEL:\n{requirements.model_dump_json()}\nANALYSIS:\n{analysis.model_dump_json()}\nANSWERS:\n{json.dumps(answers)}"""
+        raw = self.extractor.generate_json(prompt, schema)
+        return [item for item in self._as_list(raw.get("decisions") if isinstance(raw, dict) else []) if isinstance(item, dict) and item.get("question_id") and item.get("decision")]
 
     @staticmethod
     def _as_list(value: Any) -> list:

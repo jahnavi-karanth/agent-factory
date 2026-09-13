@@ -161,16 +161,25 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
                     analysis = artifacts.get_analysis(state["analysis_id"])
                     requirements, _ = artifacts.get_requirements_model(state["brd_id"])
                     round_number = int(state.get("follow_up_round", 0)) + 1
-                    answers = state["answers"]
-                    follow_ups = requirements_analyzer.generate_follow_up_questions(requirements, analysis, answers, round_number)
+                    question_map = {item["question_id"]: item for item in state["questions"]}
+                    answers = [dict(item, question=question_map.get(item["question_id"], {}).get("question", ""), issue_id=question_map.get(item["question_id"], {}).get("issue_id")) for item in state["answers"]]
+                    if int(state.get("follow_up_round", 0)) > 0:
+                        prefix = f"Q-{int(state['follow_up_round']):01d}"
+                        answers = [item for item in answers if item["question_id"].startswith(prefix)]
+                    flags = requirements_analyzer._answer_quality_flags(answers)
                     max_rounds = int(os.getenv("MAX_FOLLOW_UP_ROUNDS", "2"))
+                    if flags and round_number > max_rounds:
+                        decisions = requirements_analyzer.generate_best_decisions(requirements, analysis, answers)
+                        artifacts.save_best_decisions(session_id, decisions)
+                        artifacts.create_resolved_model(session_id)
+                        artifacts.audit("HITL_SESSION_COMPLETED", "hitl_session", session_id, details={"best_decisions": len(decisions), "follow_up_limit_reached": True})
+                        await websocket.send_json({"type": "best_decisions", "decisions": decisions, "follow_up_limit_reached": True})
+                        await websocket.send_json({"type": "completed", "session_id": session_id})
+                        break
+                    follow_ups = requirements_analyzer.generate_follow_up_questions(requirements, analysis, answers, round_number) if flags else []
                     if follow_ups and round_number <= max_rounds:
                         state = artifacts.add_follow_up_questions(session_id, follow_ups, round_number)
                         continue
-                    if follow_ups and round_number > max_rounds:
-                        artifacts.audit("HITL_SESSION_FAILED", "hitl_session", session_id, result="NEEDS_REWORK", details={"reason": "Maximum follow-up rounds exceeded"})
-                        await websocket.send_json({"type": "error", "detail": "Maximum follow-up rounds exceeded; BRD needs rework."})
-                        break
                     artifacts.create_resolved_model(session_id)
                     artifacts.audit("HITL_SESSION_COMPLETED", "hitl_session", session_id)
             await websocket.send_json({"type": "completed", "session_id": session_id})

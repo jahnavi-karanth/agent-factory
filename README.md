@@ -277,3 +277,5 @@ Meaningful business events are persisted in `audit_logs`, including BRD upload, 
 - Follow-up question generation is intentionally bounded and never fabricated merely to use a round. Human answers are persisted as the source of truth and are attached to the resolved model metadata; the original Requirements Model is never overwritten.
 
 See `MILESTONE_3_TEST_GUIDE.md` for the complete Swagger, WebSocket, migration, audit, versioning, follow-up, reconnection, and edge-case test procedure.
+
+Clearly irrelevant, undecided, or too-short answers receive a targeted follow-up. Slightly vague but relevant answers may pass. When the follow-up limit is reached, the analyzer records a conservative AI best-decision recommendation for review rather than continuing indefinitely.
