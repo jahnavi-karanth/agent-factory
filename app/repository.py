@@ -299,7 +299,7 @@ class SQLiteRepository:
                 questions = db.execute("SELECT question_id FROM clarification_questions WHERE analysis_id=? ORDER BY rowid", (analysis_id,)).fetchall()
                 if not questions:
                     raise PersistenceError("analysis contains no clarification questions")
-                db.execute("INSERT INTO hitl_sessions(session_id,analysis_id,brd_id,status,current_question_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (session_id, analysis_id, analysis["brd_id"], "ACTIVE", questions[0]["question_id"], now, now))
+                db.execute("INSERT INTO hitl_sessions(session_id,analysis_id,brd_id,status,current_question_id,follow_up_round,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (session_id, analysis_id, analysis["brd_id"], "ACTIVE", questions[0]["question_id"], 0, now, now))
                 db.commit()
             self.audit("HITL_SESSION_CREATED", "hitl_session", session_id, details={"analysis_id": analysis_id})
             return self.get_hitl_session(session_id)
