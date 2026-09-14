@@ -67,8 +67,21 @@ class RequirementsAnalyzer:
         payload = dict(raw)
         payload["issues"] = [normalized for item in self._as_list(payload.get("issues")) if (normalized := self._normalize_issue(item)) is not None]
         payload["clarification_questions"] = [normalized for item in self._as_list(payload.get("clarification_questions")) if (normalized := self._normalize_question(item)) is not None]
+        issue_ids = {item["issue_id"] for item in payload["issues"]}
+        for question in payload["clarification_questions"]:
+            if question["issue_id"] not in issue_ids:
+                suffix = str(question["issue_id"]).split("-", 1)[-1]
+                matches = [issue_id for issue_id in issue_ids if issue_id.endswith(f"-{suffix}")]
+                if matches:
+                    affected = set(question.get("affected_requirements", []))
+                    matching_issues = [item["issue_id"] for item in payload["issues"] if item["issue_id"] in matches and affected.intersection(item.get("affected_requirements", []))]
+                    question["issue_id"] = matching_issues[0] if matching_issues else sorted(matches)[0]
         max_questions = int(os.getenv("MAX_CLARIFICATION_QUESTIONS", "20"))
-        if not requirements.requirements:
+        if requirements.extraction_metadata.get("document_validity") == "invalid":
+            payload["quality_status"] = "INVALID"
+            payload["status_reason"] = "The uploaded document does not contain enough generic business-requirements structure to be treated as a BRD."
+            payload["blocking_issues"] = []
+        elif not requirements.requirements:
             payload["quality_status"] = "INVALID"
             payload["status_reason"] = "The Requirements Model contains no meaningful requirements."
             payload["blocking_issues"] = []
@@ -136,7 +149,10 @@ class RequirementsAnalyzer:
                 affected = original.affected_requirements if original else []
                 priority = original.priority if original else "MEDIUM"
                 question_text = original.question if original else flag.get("question", "the clarification question")
-                result.append({"question_id": f"Q-{round_number:01d}{index:02d}", "issue_id": issue_id, "affected_requirements": affected, "question": f"Please provide a specific, direct answer to the original question: {question_text} If this is undecided, say whether you want the AI to recommend the best option.", "reason": flag["reason"], "priority": priority, "round": round_number})
+                question_text = re.sub(r"^Please provide a specific, direct answer to the original question:\s*", "", question_text, flags=re.I).strip()
+                question_text = re.sub(r"\s*If this is undecided, say whether you want the AI to recommend the best option\.?\s*$", "", question_text, flags=re.I).strip()
+                follow_up_text = f"Please answer this question specifically: {question_text} If the decision is undecided, say whether you want the AI to recommend the best option."
+                result.append({"question_id": f"Q-{round_number:01d}{index:02d}", "issue_id": issue_id, "affected_requirements": affected, "question": follow_up_text, "reason": flag["reason"], "priority": priority, "round": round_number})
         return result
 
     @staticmethod
@@ -192,9 +208,10 @@ class RequirementsAnalyzer:
         normalized["clarification_required"] = bool(normalized.get("clarification_required", normalized.get("clarificationRequired", True)))
         if isinstance(normalized.get("issue_id"), str):
             issue_id = normalized["issue_id"].upper()
-            if issue_id.startswith("ISS-"):
+            if not re.match(r"^(AMB|GAP|CON|INC)-[0-9]{3,}$", issue_id):
                 prefix = {"ambiguity": "AMB", "gap": "GAP", "conflict": "CON", "inconsistency": "INC"}.get(normalized["type"], "GAP")
-                normalized["issue_id"] = prefix + issue_id[3:]
+                suffix = issue_id.split("-", 1)[-1] if "-" in issue_id else "001"
+                normalized["issue_id"] = f"{prefix}-{suffix.zfill(3)}"
         return {key: normalized[key] for key in ("issue_id", "type", "severity", "title", "description", "affected_requirements", "reason", "clarification_required", "severity_reason")}
 
     @staticmethod
