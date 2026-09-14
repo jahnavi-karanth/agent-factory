@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
+import json
+import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from .llm import ExtractionError
@@ -15,6 +17,9 @@ from .models import ErrorResponse, HealthResponse, RequirementsModel
 from .parser import parse_document
 from .repository import PersistenceError, SQLiteRepository
 from .service import IngestionService
+from .workflow import RequirementsWorkflow
+from .document_store import DocumentStore
+from .auth import create_token, current_user, hash_password, verify_password
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -32,18 +37,138 @@ class HITLSessionRequest(BaseModel):
     analysis_id: str
 
 
-def create_app(service: Optional[IngestionService] = None, analyzer: Optional[RequirementsAnalyzer] = None, repository: Optional[SQLiteRepository] = None) -> FastAPI:
+class ProjectRequest(BaseModel):
+    name: str
+    owner_id: Optional[str] = None
+
+
+class RequirementsWorkflowRequest(BaseModel):
+    brd_id: str
+
+
+class WorkflowResumeRequest(BaseModel):
+    payload: Any
+
+
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+
+
+def create_app(service: Optional[IngestionService] = None, analyzer: Optional[RequirementsAnalyzer] = None, repository: Optional[SQLiteRepository] = None, document_store: Optional[DocumentStore] = None) -> FastAPI:
     app = FastAPI(title="AI Software Development Factory", version="0.1.0", description="Milestone 1: generic BRD ingestion")
     ingestion = service or IngestionService()
     requirements_analyzer = analyzer or RequirementsAnalyzer()
     artifacts = repository or SQLiteRepository()
+    workflow = RequirementsWorkflow(artifacts, requirements_analyzer)
+    documents = document_store or DocumentStore()
+
+    @app.post("/auth/register", status_code=201)
+    async def register(request: AuthRequest) -> Dict[str, Any]:
+        user_id = "USR-" + uuid.uuid4().hex[:12].upper()
+        try:
+            user = artifacts.create_user(user_id, request.email, hash_password(request.password))
+            return {**user, "access_token": create_token(user_id), "token_type": "bearer"}
+        except PersistenceError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/auth/token")
+    async def login(request: AuthRequest) -> Dict[str, Any]:
+        try:
+            user = artifacts.get_user_by_email(request.email)
+            if not verify_password(request.password, user["password_hash"]):
+                raise HTTPException(status_code=401, detail="invalid credentials")
+            return {"access_token": create_token(user["user_id"]), "token_type": "bearer"}
+        except PersistenceError as exc:
+            raise HTTPException(status_code=401, detail="invalid credentials") from exc
+
+    @app.post("/projects", status_code=201)
+    async def create_project(request: ProjectRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        project_id = "PROJ-" + uuid.uuid4().hex[:12].upper()
+        try:
+            return artifacts.create_project(project_id, request.name, user_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/projects/{project_id}/workflows/requirements", status_code=202)
+    async def start_requirements_workflow(project_id: str, request: RequirementsWorkflowRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            artifacts.get_requirements_model(request.brd_id)
+            run = artifacts.create_workflow_run(project_id, request.brd_id)
+            result = workflow.start(project_id, run["run_id"], request.brd_id)
+            interrupted = bool(result.get("__interrupt__"))
+            status = "PAUSED" if interrupted else result.get("status", "COMPLETED")
+            artifacts.update_workflow_run(project_id, run["run_id"], status)
+            artifacts.record_workflow_event(project_id, run["run_id"], "clarification_required" if interrupted else "workflow_completed", {"interrupted": interrupted})
+            return {**run, "status": status, "interrupt": result.get("__interrupt__", [])}
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("requirements workflow failed")
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.get("/projects/{project_id}/runs/{run_id}")
+    async def get_workflow_run(project_id: str, run_id: str, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return artifacts.get_workflow_run(project_id, run_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/projects/{project_id}/runs/{run_id}/hitl/response")
+    async def resume_workflow(project_id: str, run_id: str, request: WorkflowResumeRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            run = artifacts.get_workflow_run(project_id, run_id)
+            result = workflow.resume(run_id, request.payload)
+            interrupted = bool(result.get("__interrupt__"))
+            status = "PAUSED" if interrupted else result.get("status", "COMPLETED")
+            artifacts.update_workflow_run(project_id, run_id, status)
+            artifacts.record_workflow_event(project_id, run_id, "approval_required" if interrupted and result.get("__interrupt__") and "approval_request" in str(result["__interrupt__"]) else "workflow_progress", {"interrupted": interrupted})
+            return {"run_id": run_id, "status": status, "interrupt": result.get("__interrupt__", []), "state": result}
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            artifacts.update_workflow_run(project_id, run_id, "FAILED", str(exc))
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/projects/{project_id}/runs/{run_id}/approval")
+    async def approval_response(project_id: str, run_id: str, request: WorkflowResumeRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        return await resume_workflow(project_id, run_id, request, user_id)
+
+    @app.get("/projects/{project_id}/runs/{run_id}/events")
+    async def workflow_events(project_id: str, run_id: str, user_id: str = Depends(current_user)) -> StreamingResponse:
+        try:
+            artifacts.get_project(project_id, user_id)
+            events = artifacts.list_workflow_events(project_id, run_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        body = "".join(f"event: {item['event_type']}\ndata: {json.dumps(item)}\n\n" for item in events)
+        return StreamingResponse(iter([body]), media_type="text/event-stream")
+
+    @app.get("/projects/{project_id}/runs/{run_id}/artifacts")
+    async def workflow_artifacts(project_id: str, run_id: str, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return artifacts.get_artifacts(project_id, run_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/projects/{project_id}/documents/search")
+    async def search_project_documents(project_id: str, q: str, limit: int = 5, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return documents.search(project_id, q, max(1, min(limit, 20)))
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         return HealthResponse(status="ok", milestone="BRD ingestion")
 
     @app.post("/api/brd/upload", response_model=RequirementsModel, responses={400: {"model": ErrorResponse}, 413: {"model": ErrorResponse}, 422: {"model": ErrorResponse}, 502: {"model": ErrorResponse}})
-    async def upload_brd(file: UploadFile = File(...)) -> RequirementsModel:
+    async def upload_brd(file: UploadFile = File(...), project_id: Optional[str] = None) -> RequirementsModel:
         filename = file.filename or "uploaded_brd"
         logger.info("upload received filename=%s", filename)
         content = await file.read(MAX_UPLOAD_BYTES + 1)
@@ -54,7 +179,11 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
             document = parse_document(filename, content)
             logger.info("document parsing completed filename=%s", filename)
             model = ingestion.ingest(document)
+            if project_id:
+                artifacts.get_project(project_id)
             artifacts.save_requirements_model(model, document.text, os.path.splitext(filename)[1].lower() or "text")
+            if project_id:
+                documents.add(model.brd_id, project_id, filename, document.text, {"source_filename": filename})
             artifacts.audit("BRD_UPLOADED", "brd", model.brd_id, details={"filename": filename})
             artifacts.audit("REQUIREMENTS_MODEL_CREATED", "requirements_model", model.brd_id, details={"requirement_count": len(model.requirements)})
             return model
@@ -195,6 +324,22 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
                 artifacts.audit("HITL_SESSION_FAILED", "hitl_session", session_id, result="FAILED", details={"reason": str(exc)})
             except Exception:
                 logger.exception("failed to audit HITL failure")
+
+    @app.websocket("/projects/{project_id}/runs/{run_id}/hitl")
+    async def project_run_hitl(websocket: WebSocket, project_id: str, run_id: str) -> None:
+        await websocket.accept()
+        try:
+            artifacts.get_workflow_run(project_id, run_id)
+            await websocket.send_json({"type": "resumed", "project_id": project_id, "run_id": run_id})
+            message = await websocket.receive_json()
+            result = workflow.resume(run_id, message.get("payload", message))
+            interrupted = bool(result.get("__interrupt__"))
+            artifacts.update_workflow_run(project_id, run_id, "PAUSED" if interrupted else result.get("status", "COMPLETED"))
+            await websocket.send_json({"type": "approval_request" if interrupted and "approval_request" in str(result.get("__interrupt__")) else "clarification_request" if interrupted else "completed", "run_id": run_id, "interrupt": result.get("__interrupt__", []), "state": result})
+        except WebSocketDisconnect:
+            return
+        except Exception as exc:
+            await websocket.send_json({"type": "error", "detail": str(exc)})
 
     @app.exception_handler(HTTPException)
     async def http_error_handler(_, exc: HTTPException) -> JSONResponse:

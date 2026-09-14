@@ -198,12 +198,53 @@ class SQLiteRepository:
                     source_model_version_id INTEGER NOT NULL REFERENCES requirements_models(model_version_id),
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS projects (
+                    project_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    owner_id TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS workflow_runs (
+                    run_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(project_id),
+                    workflow_type TEXT NOT NULL,
+                    brd_id TEXT,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS workflow_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id TEXT NOT NULL REFERENCES projects(project_id),
+                    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS workflow_artifacts (
+                    artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id TEXT NOT NULL REFERENCES projects(project_id),
+                    run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+                    markdown_path TEXT NOT NULL,
+                    json_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_hitl_analysis ON hitl_sessions(analysis_id);
                 CREATE INDEX IF NOT EXISTS idx_models_brd ON requirements_models(brd_id, version);
                 CREATE INDEX IF NOT EXISTS idx_requirements_id ON requirements(requirement_id);
                 CREATE INDEX IF NOT EXISTS idx_analyses_brd ON analyses(brd_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_issues_analysis ON issues(analysis_id);
                 CREATE INDEX IF NOT EXISTS idx_questions_analysis ON clarification_questions(analysis_id);
+                CREATE INDEX IF NOT EXISTS idx_runs_project ON workflow_runs(project_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_events_run ON workflow_events(project_id, run_id, event_id);
+                CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id);
                 """
             )
 
@@ -446,3 +487,85 @@ class SQLiteRepository:
             self.audit("HITL_BEST_DECISIONS_RECORDED", "hitl_session", session_id, details={"count": len(decisions)})
         except sqlite3.Error as exc:
             raise PersistenceError(f"best-decision persistence failed: {exc}") from exc
+
+
+    def create_project(self, project_id: str, name: str, owner_id: Optional[str] = None) -> Dict[str, Any]:
+        now = utc_now()
+        try:
+            with self.connection() as db:
+                db.execute("INSERT INTO projects(project_id,name,owner_id,created_at) VALUES(?,?,?,?)", (project_id, name, owner_id, now))
+                db.commit()
+            return {"project_id": project_id, "name": name, "owner_id": owner_id, "created_at": now}
+        except sqlite3.IntegrityError as exc:
+            raise PersistenceError(f"project already exists: {project_id}") from exc
+
+    def get_project(self, project_id: str, owner_id: Optional[str] = None) -> Dict[str, Any]:
+        with self.connection() as db:
+            row = db.execute("SELECT project_id,name,owner_id,created_at FROM projects WHERE project_id=? AND (? IS NULL OR owner_id=?)", (project_id, owner_id, owner_id)).fetchone()
+            if not row:
+                raise PersistenceError(f"no accessible project found for project_id {project_id}")
+            return dict(row)
+
+    def create_workflow_run(self, project_id: str, brd_id: str) -> Dict[str, Any]:
+        import uuid
+        self.get_project(project_id)
+        run_id = "RUN-" + uuid.uuid4().hex[:12].upper()
+        now = utc_now()
+        with self.connection() as db:
+            db.execute("INSERT INTO workflow_runs(run_id,project_id,workflow_type,brd_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (run_id, project_id, "requirements", brd_id, "STARTING", now, now))
+            db.commit()
+        self.record_workflow_event(project_id, run_id, "workflow_started", {"brd_id": brd_id})
+        return {"run_id": run_id, "project_id": project_id, "brd_id": brd_id, "status": "STARTING", "created_at": now}
+
+    def create_user(self, user_id: str, email: str, password_hash: str) -> Dict[str, Any]:
+        now = utc_now()
+        try:
+            with self.connection() as db:
+                db.execute("INSERT INTO users(user_id,email,password_hash,created_at) VALUES(?,?,?,?)", (user_id, email.lower(), password_hash, now))
+                db.commit()
+            return {"user_id": user_id, "email": email.lower(), "created_at": now}
+        except sqlite3.IntegrityError as exc:
+            raise PersistenceError("email already registered") from exc
+
+    def get_user_by_email(self, email: str) -> Dict[str, Any]:
+        with self.connection() as db:
+            row = db.execute("SELECT user_id,email,password_hash,created_at FROM users WHERE email=?", (email.lower(),)).fetchone()
+            if not row:
+                raise PersistenceError("user not found")
+            return dict(row)
+
+    def get_workflow_run(self, project_id: str, run_id: str) -> Dict[str, Any]:
+        with self.connection() as db:
+            row = db.execute("SELECT run_id,project_id,workflow_type,brd_id,status,error,created_at,updated_at FROM workflow_runs WHERE project_id=? AND run_id=?", (project_id, run_id)).fetchone()
+            if not row:
+                raise PersistenceError(f"no workflow run found for run_id {run_id}")
+            return dict(row)
+
+    def update_workflow_run(self, project_id: str, run_id: str, status: str, error: Optional[str] = None) -> None:
+        with self.connection() as db:
+            db.execute("UPDATE workflow_runs SET status=?,error=?,updated_at=? WHERE project_id=? AND run_id=?", (status, error, utc_now(), project_id, run_id))
+            db.commit()
+
+    def record_workflow_event(self, project_id: str, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        with self.connection() as db:
+            db.execute("INSERT INTO workflow_events(project_id,run_id,event_type,payload_json,created_at) VALUES(?,?,?,?,?)", (project_id, run_id, event_type, json.dumps(payload or {}), utc_now()))
+            db.commit()
+
+    def list_workflow_events(self, project_id: str, run_id: str) -> list[Dict[str, Any]]:
+        self.get_workflow_run(project_id, run_id)
+        with self.connection() as db:
+            rows = db.execute("SELECT event_id,event_type,payload_json,created_at FROM workflow_events WHERE project_id=? AND run_id=? ORDER BY event_id", (project_id, run_id)).fetchall()
+            return [{"event_id": row["event_id"], "event_type": row["event_type"], "payload": json.loads(row["payload_json"]), "created_at": row["created_at"]} for row in rows]
+
+    def record_artifacts(self, project_id: str, run_id: str, markdown_path: str, json_path: str) -> None:
+        with self.connection() as db:
+            db.execute("INSERT INTO workflow_artifacts(project_id,run_id,markdown_path,json_path,created_at) VALUES(?,?,?,?,?)", (project_id, run_id, markdown_path, json_path, utc_now()))
+            db.commit()
+
+    def get_artifacts(self, project_id: str, run_id: str) -> Dict[str, Any]:
+        self.get_workflow_run(project_id, run_id)
+        with self.connection() as db:
+            row = db.execute("SELECT markdown_path,json_path,created_at FROM workflow_artifacts WHERE project_id=? AND run_id=? ORDER BY artifact_id DESC LIMIT 1", (project_id, run_id)).fetchone()
+            if not row:
+                raise PersistenceError(f"no artifacts found for run_id {run_id}")
+            return dict(row)
