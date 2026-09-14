@@ -19,7 +19,7 @@ from .repository import PersistenceError, SQLiteRepository
 from .service import IngestionService
 from .workflow import RequirementsWorkflow
 from .document_store import DocumentStore
-from .auth import create_token, current_user, hash_password, verify_password
+from .auth import create_token, current_user, decode_token, hash_password, verify_password
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -329,6 +329,12 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
     async def project_run_hitl(websocket: WebSocket, project_id: str, run_id: str) -> None:
         await websocket.accept()
         try:
+            token = websocket.query_params.get("access_token")
+            if not token:
+                authorization = websocket.headers.get("authorization", "")
+                token = authorization.split(" ", 1)[1] if authorization.lower().startswith("bearer ") else ""
+            user_id = decode_token(token)
+            artifacts.get_project(project_id, user_id)
             artifacts.get_workflow_run(project_id, run_id)
             await websocket.send_json({"type": "resumed", "project_id": project_id, "run_id": run_id})
             message = await websocket.receive_json()

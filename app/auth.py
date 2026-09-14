@@ -38,6 +38,10 @@ def current_user(authorization: str | None = Header(default=None)) -> str:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Bearer token required")
     token = authorization.split(" ", 1)[1].strip()
+    return decode_token(token)
+
+
+def decode_token(token: str) -> str:
     try:
         payload: Dict[str, Any] = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         return str(payload["sub"])
