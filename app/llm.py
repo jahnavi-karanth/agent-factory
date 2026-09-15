@@ -66,6 +66,11 @@ EXTRACTION_SCHEMA = {
 
 class GeminiExtractor:
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, timeout: Optional[float] = None, max_retries: Optional[int] = None, fallback_model: Optional[str] = None):
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            pass
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         self.model = model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
         self.fallback_model = fallback_model if fallback_model is not None else os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash")
@@ -76,6 +81,13 @@ class GeminiExtractor:
         return self.generate_json(self._build_prompt(document), EXTRACTION_SCHEMA)
 
     def generate_json(self, prompt: str, schema: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.api_key:
+            try:
+                from dotenv import load_dotenv
+                load_dotenv()
+            except ImportError:
+                pass
+            self.api_key = os.getenv("GEMINI_API_KEY")
         if not self.api_key:
             raise ExtractionError("GEMINI_API_KEY is not configured")
         payload = {

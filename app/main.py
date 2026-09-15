@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
-import json
 import uuid
 from typing import Any, Dict, Optional
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse

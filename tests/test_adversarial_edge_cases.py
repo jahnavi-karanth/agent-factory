@@ -177,3 +177,14 @@ def test_prompt_injection_sanitization(client):
     json_str = json.dumps(reqs)
     assert "JWT_SECRET" not in json_str
     assert "OPENAI_API_KEY" not in json_str
+
+
+def test_openapi_swagger_security_scheme(client):
+    resp = client.get("/openapi.json")
+    assert resp.status_code == 200
+    schema = resp.json()
+    security_schemes = schema.get("components", {}).get("securitySchemes", {})
+    assert "HTTPBearer" in security_schemes
+    assert security_schemes["HTTPBearer"]["type"] == "http"
+    assert security_schemes["HTTPBearer"]["scheme"] == "bearer"
+

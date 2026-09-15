@@ -1,0 +1,67 @@
+{
+  "brd_id": "BRD-EF2C86DF768C",
+  "title": "Corporate Expense Management Platform",
+  "source_filename": "brd.md",
+  "business_problem": "Expense tracking.",
+  "business_objectives": [
+    "Automate expenses."
+  ],
+  "stakeholders": [
+    "Employees"
+  ],
+  "user_roles": [
+    "Employee",
+    "Manager"
+  ],
+  "requirements": [
+    {
+      "id": "REQ-001",
+      "type": "functional",
+      "description": "Users submit expenses.",
+      "source": {
+        "section": null,
+        "title": null,
+        "line_start": null,
+        "line_end": null
+      },
+      "priority": null
+    },
+    {
+      "id": "REQ-002",
+      "type": "functional",
+      "description": "Manager approval threshold required. Clarification decision (human-provided): Approval threshold is five hundred dollars.",
+      "source": {
+        "section": null,
+        "title": null,
+        "line_start": null,
+        "line_end": null
+      },
+      "priority": null
+    }
+  ],
+  "non_functional_requirements": [],
+  "business_rules": [],
+  "constraints": [],
+  "assumptions": [],
+  "data_requirements": [],
+  "external_dependencies": [],
+  "success_criteria": [],
+  "extraction_metadata": {
+    "milestone": "1",
+    "parser": "markdown",
+    "provider": "gemini",
+    "document_validity": "valid",
+    "resolved": "true",
+    "workflow_run_id": "RUN-B3B0AB2BFABE",
+    "project_id": "PROJ-F5AF6DDDFC01",
+    "human_answers": [
+      {
+        "question_id": "Q-001",
+        "answer": "Approval threshold is five hundred dollars."
+      }
+    ],
+    "ai_recommendations": [],
+    "revision_count": 0,
+    "rejection_feedback": ""
+  }
+}

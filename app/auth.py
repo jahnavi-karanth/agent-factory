@@ -8,11 +8,14 @@ import time
 from typing import Any, Dict
 
 import jwt
-from fastapi import Header, HTTPException
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 
 JWT_ALGORITHM = "HS256"
 JWT_SECRET = os.getenv("JWT_SECRET", "development-only-change-me-use-env-in-production-2026")
+
+security = HTTPBearer(auto_error=False)
 
 
 def hash_password(password: str, salt: str | None = None) -> str:
@@ -34,11 +37,10 @@ def create_token(user_id: str) -> str:
     return jwt.encode({"sub": user_id, "iat": int(time.time()), "exp": int(time.time()) + 86400}, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def current_user(authorization: str | None = Header(default=None)) -> str:
-    if not authorization or not authorization.lower().startswith("bearer "):
+def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(security)) -> str:
+    if not credentials or not credentials.credentials:
         raise HTTPException(status_code=401, detail="Bearer token required")
-    token = authorization.split(" ", 1)[1].strip()
-    return decode_token(token)
+    return decode_token(credentials.credentials)
 
 
 def decode_token(token: str) -> str:
