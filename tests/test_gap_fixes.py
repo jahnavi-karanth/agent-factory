@@ -74,3 +74,19 @@ def test_typed_clarification_rest_fallback(tmp_path, monkeypatch):
     )
     assert response.status_code == 200
     assert response.json()["status"] == "PAUSED"
+
+
+def test_start_requirements_workflow_with_document_ids(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(app_for(tmp_path / "db.sqlite3"))
+    headers = auth(client)
+    project_id = client.post("/projects", json={"name": "DocIDs Workflow"}, headers=headers).json()["project_id"]
+    upload_res = client.post(f"/projects/{project_id}/documents", files={"file": ("requirements.md", b"# Requirements\n\nThe system shall accept requests.", "text/markdown")}, headers=headers)
+    doc_id = upload_res.json()["document_id"]
+    
+    # Start workflow using document_ids instead of brd_id
+    run_res = client.post(f"/projects/{project_id}/workflows/requirements", json={"document_ids": [doc_id]}, headers=headers)
+    assert run_res.status_code == 202
+    data = run_res.json()
+    assert "run_id" in data
+    assert data["status"] in ("PAUSED", "COMPLETED")

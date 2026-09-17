@@ -248,7 +248,37 @@ def create_app(
             artifacts.get_project(project_id, user_id)
             brd_id = request.brd_id
             if not brd_id:
-                raise HTTPException(status_code=422, detail="document_ids currently require a BRD model created by /api/brd/upload; provide brd_id for the legacy extraction handoff")
+                target_doc_ids = request.document_ids
+                if not target_doc_ids:
+                    proj_docs = artifacts.list_documents(project_id)
+                    target_doc_ids = [d["document_id"] for d in proj_docs if d.get("status") == "COMPLETED"]
+
+                if not target_doc_ids:
+                    raise HTTPException(status_code=400, detail="No document_ids provided and no completed documents found for project")
+
+                combined_parts = []
+                primary_filename = "project_documents.md"
+                for doc_id in target_doc_ids:
+                    doc_meta = artifacts.get_document(project_id, doc_id)
+                    primary_filename = doc_meta.get("filename", primary_filename)
+                    sections = artifacts.list_document_sections(project_id, doc_id)
+                    if sections:
+                        doc_text = "\n\n".join(s["content"] for s in sections if s.get("content"))
+                    else:
+                        chunks = artifacts.list_document_chunks(project_id, doc_id)
+                        doc_text = "\n\n".join(c["text"] for c in chunks if c.get("text"))
+                    if doc_text:
+                        combined_parts.append(doc_text)
+
+                combined_text = "\n\n---\n\n".join(combined_parts)
+                if not combined_text.strip():
+                    raise HTTPException(status_code=400, detail="Could not retrieve text content from specified document_ids")
+
+                norm_doc = parse_document(primary_filename, combined_text.encode("utf-8"))
+                extracted_model = ingestion.ingest(norm_doc)
+                artifacts.save_requirements_model(extracted_model, combined_text, "text")
+                brd_id = extracted_model.brd_id
+
             artifacts.get_requirements_model(brd_id)
             run = artifacts.create_workflow_run(project_id, brd_id)
             result = workflow.start(project_id, run["run_id"], brd_id)
@@ -257,6 +287,8 @@ def create_app(
             artifacts.update_workflow_run(project_id, run["run_id"], status)
             artifacts.record_workflow_event(project_id, run["run_id"], "clarification_required" if interrupted else "workflow_completed", {"interrupted": interrupted})
             return JSONResponse(status_code=202, headers={"Location": f"/projects/{project_id}/runs/{run['run_id']}"}, content={**run, "status": status, "interrupt": interrupt_values(result)})
+        except HTTPException:
+            raise
         except PersistenceError as exc:
             code = 409 if "active workflow run" in str(exc) else 404
             raise HTTPException(status_code=code, detail=str(exc)) from exc

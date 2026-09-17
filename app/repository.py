@@ -643,6 +643,11 @@ class SQLiteRepository:
             row = db.execute("SELECT document_id,project_id,filename,file_type,storage_path,status,error_message,section_count,chunk_count,content_hash,created_at,updated_at FROM documents WHERE project_id=? AND content_hash=?", (project_id, content_hash)).fetchone()
             return dict(row) if row else None
 
+    def list_documents(self, project_id: str) -> list[Dict[str, Any]]:
+        with self.connection() as db:
+            rows = db.execute("SELECT document_id,project_id,filename,file_type,storage_path,status,error_message,section_count,chunk_count,content_hash,created_at,updated_at FROM documents WHERE project_id=?", (project_id,)).fetchall()
+            return [dict(row) for row in rows]
+
     def save_document_sections_and_chunks(self, document_id: str, project_id: str, sections: list[Dict[str, Any]], chunks: list[Dict[str, Any]]) -> None:
         now = utc_now()
         with self.connection() as db:
