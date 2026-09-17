@@ -1,281 +1,217 @@
 # AI Software Development Factory
 
-## Milestone 1: BRD Ingestion
+## Overview
 
-This repository implements Milestones 1 and 2 plus persistence for their artifacts: accepting a user-supplied Business Requirements Document, producing a validated Requirements Model, analyzing it for material uncertainty, and persisting the resulting issues and clarification questions. It does **not** implement Pattern KB/RAG, architecture generation, code generation, or validation of generated software.
+This repository implements the **AI Software Development Factory** backend:
+- **Milestone 1**: Project management, authentication, FileStore file storage, multi-format document ingestion (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.md`, `.txt`), parsing, section/chunk extraction, SQLite persistence, ChromaDB vector store embeddings with mandatory `project_id` metadata and isolation, and document status/sections APIs.
+- **Milestone 2**: Requirements Analysis, quality status classification (`INVALID`, `NEEDS_REWORK`, `READY_FOR_CLARIFICATION`, `READY`), gap/ambiguity issue identification, and neutral clarification questions.
+- **Milestone 3**: Human-in-the-Loop (HITL) WebSocket clarification sessions, follow-up round generation, best-decision fallbacks, workflow runs, and event streams.
 
-### Architecture
+---
+
+## Change History & Reference Log
+
+### 1. Changes Made Prior to M1 Completion Prompt
+- **OpenAPI Authorize Button Fix**: Updated `app/auth.py` to use FastAPI's `HTTPBearer(auto_error=False)` security scheme instead of a plain header parameter. This populates `components.securitySchemes` in `openapi.json` and renders the green **Authorize** padlock button at the top right of Swagger UI (`/docs`).
+- **Environment Variable Loading (.env)**: Added `load_dotenv()` in `app/main.py` and `app/llm.py` so that `os.getenv("GEMINI_API_KEY")` and other parameters automatically load from `.env` on server startup.
+- **`python-dotenv` Dependency**: Added `python-dotenv>=1.0,<2` to `requirements.txt`.
+
+### 2. Changes Made for Official Milestone 1 Completion
+- **FileStore Abstraction** ([`app/filestore.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/filestore.py)):
+  - Implemented `FileStore` class storing uploaded raw files at `./data/projects/{project_id}/uploads/{document_id}.{ext}`.
+  - Built-in path traversal defenses against malicious filenames (`../../evil.txt`, absolute paths, special characters).
+- **Database Schema Extensions** ([`app/repository.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/repository.py)):
+  - Updated `projects` table to include `status` (`draft`, `ready`, `running`, `archived`) and `updated_at`.
+  - Added tables `documents`, `document_sections`, and `document_chunks` for persistence.
+  - Added repository CRUD methods: `list_projects`, `update_project`, `save_document`, `get_document`, `save_document_sections_and_chunks`, `list_document_sections`, and `list_document_chunks`.
+- **Alembic Migration** ([`alembic/versions/0004_documents_and_project_status.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/alembic/versions/0004_documents_and_project_status.py)):
+  - Created migration `0004_documents_and_project_status` for reproducible schema setup.
+- **Document Parser & Chunking** ([`app/parser.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/parser.py)):
+  - Extended text extraction for all 6 supported file formats (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.md`, `.txt`).
+  - Implemented `extract_sections_and_chunks()` returning `ParsedSection` and `ParsedChunk` with stable section IDs (`SEC-001`, `SEC-002`...) and chunk IDs.
+- **Vector Store Embeddings & Project Isolation** ([`app/document_store.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/document_store.py)):
+  - Added `add_chunks()` method storing chunk-level entries in ChromaDB's `documents` collection with mandatory metadata: `document_id`, `section_id`, `section_title`, `page`, `kind`, `project_id`.
+  - Enforced `where={"project_id": project_id}` filter on all vector search operations.
+- **REST API Endpoints** ([`app/main.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/main.py)):
+  - `POST /auth/login` (alias for `POST /auth/token`)
+  - `POST /projects` (creates project, validates status in `draft`, `ready`, `running`, `archived`)
+  - `GET /projects` (lists all projects owned by authenticated user)
+  - `GET /projects/{project_id}` (retrieves single project; 404 if unauthorized/missing)
+  - `PATCH /projects/{project_id}` (updates project name and/or status; 404 if unauthorized/missing)
+  - `POST /projects/{project_id}/documents` (multipart file upload for all 6 formats, FileStore storage, parsing, DB persistence, and ChromaDB chunk vector embedding)
+  - `GET /projects/{project_id}/documents/{document_id}` (retrieves document parse status & section/chunk counts)
+  - `GET /projects/{project_id}/documents/{document_id}/sections` (retrieves structured document sections)
+- **Official Milestone 1 Tests** ([`tests/test_m1_official.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/tests/test_m1_official.py)):
+  - Added 9 comprehensive integration test functions covering authentication, project lifecycle & isolation, all 6 file formats, path traversal defense, document status, section structure, and ChromaDB project isolation search.
+  - All 84 tests in the test suite pass with zero regressions across M1, M2, and M3.
+
+---
+
+## Architecture Overview
 
 ```text
-User / Client
-    |
-    v
-POST /api/brd/upload
-    |
-    v
-File validation (extension, UTF-8, size, empty input)
-    |
-    v
-Markdown/TXT document parser -> normalized document
-    |
-    v
-RequirementExtractor interface -> GeminiExtractor
-    |
-    v
-Pydantic RequirementsModel validation
-    |
-    v
-SQLite repository: BRD + Requirements Model + Requirements
-    |
-    v
-POST /api/requirements/analyze {"brd_id": "..."}
-    |
-    v
-Milestone 2 analysis -> SQLite: Analysis + Issues + Questions
+Client / Frontend
+    │
+    ├── POST /auth/register & POST /auth/login -> JWT Token
+    │
+    ├── POST /projects -> Create Project Aggregate (status: draft|ready|running|archived)
+    │
+    ├── POST /projects/{project_id}/documents (Multipart upload: .pdf, .docx, .pptx, .xlsx, .md, .txt)
+    │     ├── FileStore -> ./data/projects/{project_id}/uploads/{document_id}.{ext}
+    │     ├── Parser -> Text & Headings Extraction -> Sections & Chunks (SEC-001, CHK-001)
+    │     ├── SQLite Repository -> Persist documents, document_sections, document_chunks
+    │     └── DocumentStore (ChromaDB) -> Upsert chunks to `documents` collection
+    │           └── Mandatory Metadata: document_id, section_id, section_title, page, kind, project_id
+    │
+    ├── GET /projects/{project_id}/documents/{document_id} -> Status & counts
+    ├── GET /projects/{project_id}/documents/{document_id}/sections -> Section outline
+    └── GET /projects/{project_id}/documents/search?q=... -> Project-filtered vector search (where={"project_id": project_id})
 ```
 
-The repository BRDs are development fixtures only. Normal operation accepts uploaded content and does not read a BRD from the repository.
+---
 
-## Supported input
+## Supported Input Formats
 
-The supplied BRDs are Markdown files, so Milestone 1 supports `.md`, `.markdown`, and `.txt` UTF-8 documents. PDF/DOCX parsing is intentionally deferred until a provided BRD requires it. The default maximum upload size is 10 MiB and can be changed with `MAX_UPLOAD_BYTES`.
+- **Markdown**: `.md`, `.markdown`
+- **Plain Text**: `.txt`
+- **PDF**: `.pdf`
+- **Word Document**: `.docx`
+- **PowerPoint Presentation**: `.pptx`
+- **Excel Spreadsheet**: `.xlsx`
 
-## Prerequisites and setup
+Maximum upload size defaults to 10 MiB (configurable via `MAX_UPLOAD_BYTES`).
+
+---
+
+## Setup & Quickstart
+
+### 1. Installation
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set `GEMINI_API_KEY` in `.env` or in the process environment. The key is never stored in source code or logged. The default primary model is `gemini-3.5-flash-lite`. Optional variables are `GEMINI_MODEL`, `GEMINI_FALLBACK_MODEL` (default `gemini-3.5-flash`), `GEMINI_TIMEOUT_SECONDS` (default `180`), `GEMINI_MAX_RETRIES` (default `2`), `MAX_UPLOAD_BYTES`, `LOG_LEVEL`, and `DATABASE_PATH` (default `data/agent_factory.sqlite3`). A transient Gemini `503 UNAVAILABLE` response is retried with bounded exponential backoff and then attempted with the fallback model.
+### 2. Database Migrations
 
-## Run the application
-
-```bash
-python -m uvicorn app.main:app --reload
-```
-
-Interactive OpenAPI documentation is available at <http://127.0.0.1:8000/docs>.
-
-## Upload a BRD
+Run Alembic schema migrations:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/brd/upload \
-  -F "file=@'Business Requirements Document — Corporate Expense Management Platform.md';type=text/markdown"
-```
-
-The request is multipart form data with one field named `file`. A successful response has this shape:
-
-```json
-{
-  "brd_id": "BRD-<content-hash>",
-  "title": "...",
-  "source_filename": "requirements.md",
-  "business_problem": "...",
-  "business_objectives": [],
-  "stakeholders": [],
-  "user_roles": [],
-  "requirements": [
-    {
-      "id": "REQ-001",
-      "type": "functional",
-      "description": "...",
-      "source": {"section": "7.1", "title": "...", "line_start": null, "line_end": null},
-      "priority": null
-    }
-  ],
-  "non_functional_requirements": [],
-  "business_rules": [],
-  "constraints": [],
-  "assumptions": [],
-  "data_requirements": [],
-  "external_dependencies": [],
-  "success_criteria": [],
-  "extraction_metadata": {"milestone": "1", "parser": "markdown", "provider": "gemini"}
-}
-```
-
-If the file is invalid, empty, too large, unsupported, or Gemini cannot produce a valid model, the API returns a structured error with `error` and `detail` fields. No fallback requirements are fabricated.
-
-## Tests
-
-Tests mock the extraction provider, so they do not require a live Gemini key:
-
-```bash
-pytest -q
-```
-
-The suite covers health, upload, parsing, stable IDs, schema validation, source traceability, generic processing of another BRD, unsupported/empty files, and provider failure handling.
-
-## Schema design
-
-The model adds `source_filename`, `extraction_metadata`, and a structured `SourceReference` to the suggested schema. These preserve upload provenance and leave room for later traceability without changing the core requirement shape. Missing BRD categories remain empty lists or `null`; priorities are never inferred.
-
-## SQLite persistence
-
-The application uses SQLite through `app/repository.py`; route handlers and Gemini code do not contain SQL. The default database file is:
-
-```text
-data/agent_factory.sqlite3
-```
-
-Set `DATABASE_PATH` to choose another location. The database contains `brds`, `requirements_models`, `requirements`, `analyses`, `issues`, `issue_requirements`, `clarification_questions`, and `question_requirements`. Foreign keys and indexes preserve BRD → Requirements Model → Requirement → Analysis → Issue/Question traceability. Every upload creates a persisted Requirements Model version, and every analysis creates a separate analysis record; prior analyses are not silently overwritten.
-
-### Persisted workflow
-
-1. `POST /api/brd/upload` validates and extracts the BRD, persists its metadata, Requirements Model, and individual requirements, then returns the model.
-2. `POST /api/requirements/analyze` accepts `{"brd_id": "BRD-..."}`, retrieves the latest persisted Requirements Model, analyzes it, atomically persists the analysis, issues, questions, and relationships, then returns the result.
-3. The previous full Requirements Model request format remains supported for compatibility, but the recommended workflow uses only `brd_id`.
-
-### Retrieval APIs
-
-```text
-GET /api/brd/{brd_id}/requirements
-GET /api/analysis/{analysis_id}
-```
-
-The first returns the persisted Requirements Model with stable requirement IDs and source references. The second returns the persisted analysis, summary, issues, questions, and affected requirement relationships. Data survives application restarts.
-
-### Reset the development database
-
-Stop the application, then remove the local SQLite file:
-
-```bash
-rm -f data/agent_factory.sqlite3
-```
-
-The database is recreated automatically at the next application start. Do not remove a database containing artifacts you need to retain.
-
-## Known limitations and assumptions
-
-- Gemini is the only production extractor currently implemented, behind the `RequirementExtractor` interface.
-- Only UTF-8 Markdown/plain text is supported because those are the formats present in the supplied fixtures.
-- SQLite is intended for the current development/demo environment; the repository abstraction allows a later datastore replacement.
-- Requirement ordering and IDs are validated as sequential `REQ-001`, `REQ-002`, etc. The extractor is instructed to emit them in document order.
-- Milestone 2 identifies ambiguity, gaps, conflicts, and inconsistencies but does not accept human answers or resolve requirements.
-
-## Milestone 2: Requirements Analysis and Clarification Questions
-
-Milestone 2 consumes the validated Milestone 1 Requirements Model from SQLite by `brd_id`. It does not re-parse the original BRD. It asks Gemini to identify only meaningful ambiguity, gaps, conflicts, and inconsistencies, then validates all issue and question references deterministically.
-
-### Analyze a Requirements Model
-
-```text
-POST /api/requirements/analyze
-Content-Type: application/json
-```
-
-The recommended request body contains only the BRD ID persisted by Milestone 1:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/requirements/analyze \
-  -H 'Content-Type: application/json' \
-  -d '{"brd_id":"BRD-..."}'
-```
-
-The response contains `analysis_id`, `status`, a summary, structured issues, and neutral clarification questions. Existing requirement IDs are preserved and every referenced ID must exist in the submitted model.
-
-Issue severity uses this vocabulary:
-
-| Severity | Meaning |
-|---|---|
-| `LOW` | Minor uncertainty unlikely to affect architecture |
-| `MEDIUM` | Could affect implementation or one component |
-| `HIGH` | Could materially affect workflow, data, security, integrations, or architecture |
-| `CRITICAL` | Could fundamentally change the design or make implementation incorrect |
-
-Milestone 2 does not accept human answers or modify requirements. Human answer resolution belongs to a later milestone.
-
-## Milestone 3: Human-in-the-Loop clarification
-
-Milestone 3 is limited to business clarification and resolution. It does not implement RAG, Pattern KB retrieval, architecture generation, code generation, or testing agents.
-
-### Database migrations
-
-The project uses Alembic for reproducible SQLite schema creation. On a fresh clone:
-
-```bash
-python -m pip install -r requirements.txt
 alembic upgrade head
 ```
 
-The default database is `data/agent_factory.sqlite3`. Set `DATABASE_PATH` to use another SQLite file. The migration is safe for an existing database created by the earlier persistence layer: it preserves existing rows and adds the new versioning, audit, and HITL tables.
+### 3. Running the Server
 
-The application still initializes missing tables defensively for compatibility with older development databases; Alembic is the authoritative schema setup for clean environments.
+Start the Uvicorn development server:
 
-### BRD quality statuses
-
-M2 exposes `quality_status` in addition to its analysis status:
-
-| Status | Meaning | HITL allowed? |
-|---|---|---:|
-| `INVALID` | The input is not meaningfully usable as a BRD. | No |
-| `NEEDS_REWORK` | The BRD is recognizable but too incomplete or contradictory to proceed safely. | No |
-| `READY_FOR_CLARIFICATION` | The BRD is usable and has bounded answerable questions. | Yes |
-| `READY` | No meaningful clarification is required. | No |
-
-The backend applies the status from validated analysis results and the configured question limit. It does not invent business decisions.
-
-### Clarification safeguards
-
-Configure these in `.env`:
-
-```env
-MAX_CLARIFICATION_QUESTIONS=20
-MAX_FOLLOW_UP_ROUNDS=2
+```bash
+uv run uvicorn app.main:app --reload --port 8000
 ```
 
-The question limit is a safety ceiling, not a target. Follow-up generation evaluates the persisted Requirements Model, original analysis, and human answers without rerunning the full M2 analysis. Follow-up rounds are persisted and bounded by `MAX_FOLLOW_UP_ROUNDS`.
+Open interactive Swagger UI docs at: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
-### HITL API and WebSocket
+---
 
-Create a session from a persisted M2 analysis:
+## End-to-End API Usage Guide
 
-```text
-POST /api/hitl/session
-{"analysis_id":"ANALYSIS-..."}
+### 1. Register and Login
+
+```bash
+# Register User
+curl -X POST http://127.0.0.1:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"dev@example.com","password":"Password123!"}'
+
+# Login to get JWT Token
+curl -X POST http://127.0.0.1:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"dev@example.com","password":"Password123!"}'
 ```
 
-A session is created only when the analysis is `READY_FOR_CLARIFICATION` and contains questions. Sessions are rejected for `INVALID`, `NEEDS_REWORK`, `READY`, or analyses with no questions.
-
-Retrieve a resumable session:
-
-```text
-GET /api/hitl/session/{session_id}
-```
-
-Connect to:
-
-```text
-/ws/hitl/{session_id}
-```
-
-The server sends structured messages such as:
-
+Response:
 ```json
-{"type":"question","question":{"question_id":"Q-001","question":"..."}}
+{
+  "access_token": "<jwt-token-string>",
+  "token_type": "bearer"
+}
 ```
 
-Answer with:
+### 2. Create and Manage Projects
 
+```bash
+TOKEN="<jwt-token-string>"
+
+# Create Project
+curl -X POST http://127.0.0.1:8000/projects \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Expense Management Platform","status":"draft"}'
+
+# List Projects
+curl -X GET http://127.0.0.1:8000/projects \
+  -H "Authorization: Bearer $TOKEN"
+
+# Update Project Status to 'ready'
+curl -X PATCH http://127.0.0.1:8000/projects/PROJ-123456 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"ready"}'
+```
+
+### 3. Upload Project Document
+
+```bash
+curl -X POST http://127.0.0.1:8000/projects/PROJ-123456/documents \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@'Business Requirements Document — Corporate Expense Management Platform.md';type=text/markdown"
+```
+
+Response:
 ```json
-{"type":"answer","question_id":"Q-001","answer":"Managers approve expenses."}
+{
+  "document_id": "DOC-A1B2C3D4E5F6",
+  "project_id": "PROJ-123456",
+  "filename": "Business Requirements Document — Corporate Expense Management Platform.md",
+  "file_type": ".md",
+  "storage_path": "/.../data/projects/PROJ-123456/uploads/DOC-A1B2C3D4E5F6.md",
+  "status": "COMPLETED",
+  "error_message": null,
+  "section_count": 8,
+  "chunk_count": 24,
+  "created_at": "2026-09-15T12:00:00+00:00",
+  "updated_at": "2026-09-15T12:00:00+00:00"
+}
 ```
 
-The server acknowledges the answer, persists it, advances to the next unanswered question, and can create a bounded follow-up question when an answer reveals a genuine new ambiguity. Disconnecting and reconnecting resumes from the first unanswered question. Completed clarification creates a new resolved Requirements Model version while preserving the original model.
+### 4. Check Document Status & Retrieve Sections
 
-### Audit trail
+```bash
+# Get Document Status
+curl -X GET http://127.0.0.1:8000/projects/PROJ-123456/documents/DOC-A1B2C3D4E5F6 \
+  -H "Authorization: Bearer $TOKEN"
 
-Meaningful business events are persisted in `audit_logs`, including BRD upload, Requirements Model creation, analysis start/completion, HITL session creation, question presentation, answer receipt/recording, completion, failures, and resolved-model creation. Secrets and API keys are never placed in audit metadata.
+# Get Document Sections Outline
+curl -X GET http://127.0.0.1:8000/projects/PROJ-123456/documents/DOC-A1B2C3D4E5F6/sections \
+  -H "Authorization: Bearer $TOKEN"
+```
 
-## Current limitations
+### 5. Project-Scoped Document Search
 
-- The initial status classifier is deterministic around validated M2 findings and configured limits; richer semantic BRD quality classification can be expanded later without changing the persistence or HITL interfaces.
-- Follow-up question generation is intentionally bounded and never fabricated merely to use a round. Human answers are persisted as the source of truth and are attached to the resolved model metadata; the original Requirements Model is never overwritten.
+```bash
+curl -X GET "http://127.0.0.1:8000/projects/PROJ-123456/documents/search?q=receipts" \
+  -H "Authorization: Bearer $TOKEN"
+```
 
-See `MILESTONE_3_TEST_GUIDE.md` for the complete Swagger, WebSocket, migration, audit, versioning, follow-up, reconnection, and edge-case test procedure.
+---
 
-Clearly irrelevant, undecided, or too-short answers receive a targeted follow-up. Slightly vague but relevant answers may pass. When the follow-up limit is reached, the analyzer records a conservative AI best-decision recommendation for review rather than continuing indefinitely.
+## Test Execution
+
+Run the complete test suite (84 tests):
+
+```bash
+uv run pytest
+```
+
+All tests mock external services and run locally using temporary SQLite databases and Chroma stores.

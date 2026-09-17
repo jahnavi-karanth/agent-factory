@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
@@ -18,17 +19,19 @@ from .llm import ExtractionError
 from .analysis_models import RequirementsAnalysis
 from .analyzer import RequirementsAnalyzer
 from .models import ErrorResponse, HealthResponse, RequirementsModel
-from .parser import parse_document
+from .parser import parse_document, extract_sections_and_chunks, SUPPORTED_EXTENSIONS
 from .repository import PersistenceError, SQLiteRepository
 from .service import IngestionService
 from .workflow import RequirementsWorkflow
 from .document_store import DocumentStore
 from .auth import create_token, current_user, decode_token, hash_password, verify_password
+from .filestore import FileStore
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+VALID_PROJECT_STATUSES = {"draft", "ready", "running", "archived"}
 
 
 class AnalysisRequest(BaseModel):
@@ -43,7 +46,13 @@ class HITLSessionRequest(BaseModel):
 
 class ProjectRequest(BaseModel):
     name: str
+    status: Optional[str] = "draft"
     owner_id: Optional[str] = None
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    status: Optional[str] = None
 
 
 class RequirementsWorkflowRequest(BaseModel):
@@ -59,6 +68,7 @@ class AuthRequest(BaseModel):
     password: str
 
 
+
 def create_app(service: Optional[IngestionService] = None, analyzer: Optional[RequirementsAnalyzer] = None, repository: Optional[SQLiteRepository] = None, document_store: Optional[DocumentStore] = None) -> FastAPI:
     app = FastAPI(title="AI Software Development Factory", version="0.1.0", description="Milestone 1: generic BRD ingestion")
     ingestion = service or IngestionService()
@@ -66,6 +76,7 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
     artifacts = repository or SQLiteRepository()
     workflow = RequirementsWorkflow(artifacts, requirements_analyzer)
     documents = document_store or DocumentStore()
+    filestore = FileStore()
 
     @app.post("/auth/register", status_code=201)
     async def register(request: AuthRequest) -> Dict[str, Any]:
@@ -86,13 +97,118 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
         except PersistenceError as exc:
             raise HTTPException(status_code=401, detail="invalid credentials") from exc
 
+    @app.post("/auth/login")
+    async def auth_login(request: AuthRequest) -> Dict[str, Any]:
+        return await login(request)
+
     @app.post("/projects", status_code=201)
     async def create_project(request: ProjectRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        status = request.status or "draft"
+        if status not in VALID_PROJECT_STATUSES:
+            raise HTTPException(status_code=422, detail=f"Invalid project status '{status}'. Must be one of: {sorted(VALID_PROJECT_STATUSES)}")
         project_id = "PROJ-" + uuid.uuid4().hex[:12].upper()
         try:
-            return artifacts.create_project(project_id, request.name, user_id)
+            return artifacts.create_project(project_id, request.name, user_id, status=status)
         except PersistenceError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/projects")
+    async def list_projects(user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
+        return artifacts.list_projects(user_id)
+
+    @app.get("/projects/{project_id}")
+    async def get_project(project_id: str, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        try:
+            return artifacts.get_project(project_id, user_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.patch("/projects/{project_id}")
+    async def update_project(project_id: str, request: ProjectUpdateRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        if request.status is not None and request.status not in VALID_PROJECT_STATUSES:
+            raise HTTPException(status_code=422, detail=f"Invalid project status '{request.status}'. Must be one of: {sorted(VALID_PROJECT_STATUSES)}")
+        try:
+            return artifacts.update_project(project_id, user_id, name=request.name, status=request.status)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/projects/{project_id}/documents/search")
+    async def search_project_documents(project_id: str, q: str, limit: int = 5, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return documents.search(project_id, q, max(1, min(limit, 20)))
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/projects/{project_id}/documents", status_code=201)
+    async def upload_project_document(project_id: str, file: UploadFile = File(...), user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        try:
+            artifacts.get_project(project_id, user_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        raw_filename = file.filename or "uploaded_document"
+        filename = Path(raw_filename).name or "uploaded_document"
+        suffix = os.path.splitext(filename)[1].lower()
+        if not suffix or suffix not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(status_code=400, detail=f"Unsupported file format '{suffix}'. Supported: {sorted(SUPPORTED_EXTENSIONS)}")
+
+        content = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=f"Document exceeds maximum upload size of {MAX_UPLOAD_BYTES} bytes")
+        if not content or not content.strip():
+            raise HTTPException(status_code=400, detail="The uploaded document is empty")
+
+        document_id = "DOC-" + uuid.uuid4().hex[:12].upper()
+        try:
+            storage_path = filestore.save_file(project_id, document_id, filename, content)
+            parsed_doc = parse_document(filename, content)
+            sections, chunks = extract_sections_and_chunks(parsed_doc)
+
+            sections_data = [
+                {"section_id": s.section_id, "title": s.title, "level": s.level, "content": s.content, "chunk_count": s.chunk_count}
+                for s in sections
+            ]
+            chunks_data = [
+                {"chunk_id": f"{document_id}_{c.chunk_id}", "section_id": c.section_id, "section_title": c.section_title, "text": c.text, "kind": c.kind, "page": c.page}
+                for c in chunks
+            ]
+
+            doc_record = artifacts.save_document(
+                project_id=project_id,
+                document_id=document_id,
+                filename=filename,
+                file_type=suffix,
+                storage_path=storage_path,
+                status="COMPLETED",
+                section_count=len(sections),
+                chunk_count=len(chunks),
+            )
+            artifacts.save_document_sections_and_chunks(document_id, project_id, sections_data, chunks_data)
+            documents.add_chunks(document_id, project_id, chunks_data)
+            return doc_record
+        except ValueError as exc:
+            artifacts.save_document(project_id=project_id, document_id=document_id, filename=filename, file_type=suffix, storage_path="", status="FAILED", error_message=str(exc))
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            artifacts.save_document(project_id=project_id, document_id=document_id, filename=filename, file_type=suffix, storage_path="", status="FAILED", error_message=str(exc))
+            raise HTTPException(status_code=422, detail=f"Document processing failed: {exc}") from exc
+
+    @app.get("/projects/{project_id}/documents/{document_id}")
+    async def get_project_document_status(project_id: str, document_id: str, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return artifacts.get_document(project_id, document_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/projects/{project_id}/documents/{document_id}/sections")
+    async def get_project_document_sections(project_id: str, document_id: str, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return artifacts.list_document_sections(project_id, document_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/projects/{project_id}/workflows/requirements", status_code=202)
     async def start_requirements_workflow(project_id: str, request: RequirementsWorkflowRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
@@ -156,14 +272,6 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
         try:
             artifacts.get_project(project_id, user_id)
             return artifacts.get_artifacts(project_id, run_id)
-        except PersistenceError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.get("/projects/{project_id}/documents/search")
-    async def search_project_documents(project_id: str, q: str, limit: int = 5, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
-        try:
-            artifacts.get_project(project_id, user_id)
-            return documents.search(project_id, q, max(1, min(limit, 20)))
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

@@ -202,6 +202,42 @@ class SQLiteRepository:
                     project_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     owner_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS documents (
+                    document_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(project_id),
+                    filename TEXT NOT NULL,
+                    file_type TEXT NOT NULL,
+                    storage_path TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    error_message TEXT,
+                    section_count INTEGER NOT NULL DEFAULT 0,
+                    chunk_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS document_sections (
+                    section_id TEXT NOT NULL,
+                    document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+                    project_id TEXT NOT NULL REFERENCES projects(project_id),
+                    title TEXT NOT NULL,
+                    level INTEGER NOT NULL DEFAULT 1,
+                    content TEXT NOT NULL,
+                    chunk_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(document_id, section_id)
+                );
+                CREATE TABLE IF NOT EXISTS document_chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+                    section_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL REFERENCES projects(project_id),
+                    text TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'text',
+                    page INTEGER,
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS users (
@@ -245,8 +281,18 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS idx_runs_project ON workflow_runs(project_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_events_run ON workflow_events(project_id, run_id, event_id);
                 CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id);
+                CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_sections_doc ON document_sections(document_id);
+                CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(document_id);
                 """
             )
+            # Ensure migration columns for projects if created with older schema
+            columns = [col["name"] for col in db.execute("PRAGMA table_info(projects)").fetchall()]
+            if "status" not in columns:
+                db.execute("ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'")
+            if "updated_at" not in columns:
+                db.execute("ALTER TABLE projects ADD COLUMN updated_at TEXT")
+            db.commit()
 
     def save_requirements_model(self, model: RequirementsModel, content: str, file_type: str) -> int:
         now = utc_now()
@@ -489,22 +535,117 @@ class SQLiteRepository:
             raise PersistenceError(f"best-decision persistence failed: {exc}") from exc
 
 
-    def create_project(self, project_id: str, name: str, owner_id: Optional[str] = None) -> Dict[str, Any]:
+    def create_project(self, project_id: str, name: str, owner_id: Optional[str] = None, status: str = "draft") -> Dict[str, Any]:
         now = utc_now()
         try:
             with self.connection() as db:
-                db.execute("INSERT INTO projects(project_id,name,owner_id,created_at) VALUES(?,?,?,?)", (project_id, name, owner_id, now))
+                db.execute("INSERT INTO projects(project_id,name,owner_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", (project_id, name, owner_id, status, now, now))
                 db.commit()
-            return {"project_id": project_id, "name": name, "owner_id": owner_id, "created_at": now}
+            return {"project_id": project_id, "name": name, "owner_id": owner_id, "status": status, "created_at": now, "updated_at": now}
         except sqlite3.IntegrityError as exc:
             raise PersistenceError(f"project already exists: {project_id}") from exc
 
     def get_project(self, project_id: str, owner_id: Optional[str] = None) -> Dict[str, Any]:
         with self.connection() as db:
-            row = db.execute("SELECT project_id,name,owner_id,created_at FROM projects WHERE project_id=? AND (? IS NULL OR owner_id=?)", (project_id, owner_id, owner_id)).fetchone()
+            row = db.execute("SELECT project_id,name,owner_id,status,created_at,updated_at FROM projects WHERE project_id=? AND (? IS NULL OR owner_id=?)", (project_id, owner_id, owner_id)).fetchone()
             if not row:
                 raise PersistenceError(f"no accessible project found for project_id {project_id}")
+            res = dict(row)
+            if not res.get("status"):
+                res["status"] = "draft"
+            return res
+
+    def list_projects(self, owner_id: str) -> list[Dict[str, Any]]:
+        with self.connection() as db:
+            rows = db.execute("SELECT project_id,name,owner_id,status,created_at,updated_at FROM projects WHERE owner_id=? ORDER BY created_at DESC", (owner_id,)).fetchall()
+            results = []
+            for row in rows:
+                item = dict(row)
+                if not item.get("status"):
+                    item["status"] = "draft"
+                results.append(item)
+            return results
+
+    def update_project(self, project_id: str, owner_id: str, name: Optional[str] = None, status: Optional[str] = None) -> Dict[str, Any]:
+        self.get_project(project_id, owner_id)
+        now = utc_now()
+        updates = []
+        params = []
+        if name is not None:
+            updates.append("name=?")
+            params.append(name)
+        if status is not None:
+            updates.append("status=?")
+            params.append(status)
+        if not updates:
+            return self.get_project(project_id, owner_id)
+        updates.append("updated_at=?")
+        params.extend([now, project_id, owner_id])
+        with self.connection() as db:
+            db.execute(f"UPDATE projects SET {', '.join(updates)} WHERE project_id=? AND owner_id=?", params)
+            db.commit()
+        return self.get_project(project_id, owner_id)
+
+    def save_document(
+        self,
+        project_id: str,
+        document_id: str,
+        filename: str,
+        file_type: str,
+        storage_path: str,
+        status: str = "COMPLETED",
+        error_message: Optional[str] = None,
+        section_count: int = 0,
+        chunk_count: int = 0,
+    ) -> Dict[str, Any]:
+        now = utc_now()
+        with self.connection() as db:
+            db.execute(
+                "INSERT INTO documents(document_id,project_id,filename,file_type,storage_path,status,error_message,section_count,chunk_count,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET status=excluded.status,error_message=excluded.error_message,"
+                "section_count=excluded.section_count,chunk_count=excluded.chunk_count,updated_at=excluded.updated_at",
+                (document_id, project_id, filename, file_type, storage_path, status, error_message, section_count, chunk_count, now, now),
+            )
+            db.commit()
+        return self.get_document(project_id, document_id)
+
+    def get_document(self, project_id: str, document_id: str) -> Dict[str, Any]:
+        with self.connection() as db:
+            row = db.execute("SELECT document_id,project_id,filename,file_type,storage_path,status,error_message,section_count,chunk_count,created_at,updated_at FROM documents WHERE project_id=? AND document_id=?", (project_id, document_id)).fetchone()
+            if not row:
+                raise PersistenceError(f"document {document_id} not found in project {project_id}")
             return dict(row)
+
+    def save_document_sections_and_chunks(self, document_id: str, project_id: str, sections: list[Dict[str, Any]], chunks: list[Dict[str, Any]]) -> None:
+        now = utc_now()
+        with self.connection() as db:
+            db.execute("BEGIN")
+            db.execute("DELETE FROM document_sections WHERE document_id=?", (document_id,))
+            db.execute("DELETE FROM document_chunks WHERE document_id=?", (document_id,))
+            for sec in sections:
+                db.execute(
+                    "INSERT INTO document_sections(section_id,document_id,project_id,title,level,content,chunk_count,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (sec["section_id"], document_id, project_id, sec["title"], sec.get("level", 1), sec.get("content", ""), sec.get("chunk_count", 0), now),
+                )
+            for chk in chunks:
+                db.execute(
+                    "INSERT INTO document_chunks(chunk_id,document_id,section_id,project_id,text,kind,page,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (chk["chunk_id"], document_id, chk["section_id"], project_id, chk["text"], chk.get("kind", "text"), chk.get("page"), now),
+                )
+            db.execute("UPDATE documents SET section_count=?,chunk_count=?,status='COMPLETED',updated_at=? WHERE document_id=?", (len(sections), len(chunks), now, document_id))
+            db.commit()
+
+    def list_document_sections(self, project_id: str, document_id: str) -> list[Dict[str, Any]]:
+        self.get_document(project_id, document_id)
+        with self.connection() as db:
+            rows = db.execute("SELECT section_id,document_id,project_id,title,level,content,chunk_count,created_at FROM document_sections WHERE document_id=? AND project_id=? ORDER BY rowid", (document_id, project_id)).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_document_chunks(self, project_id: str, document_id: str) -> list[Dict[str, Any]]:
+        self.get_document(project_id, document_id)
+        with self.connection() as db:
+            rows = db.execute("SELECT chunk_id,document_id,section_id,project_id,text,kind,page,created_at FROM document_chunks WHERE document_id=? AND project_id=? ORDER BY rowid", (document_id, project_id)).fetchall()
+            return [dict(row) for row in rows]
 
     def create_workflow_run(self, project_id: str, brd_id: str) -> Dict[str, Any]:
         import uuid
