@@ -47,7 +47,10 @@ def client(test_repo, test_doc_store, pattern_service):
         document_store=test_doc_store,
         pattern_service=pattern_service,
     )
-    return TestClient(app)
+    test_client = TestClient(app)
+    registration = test_client.post("/auth/register", json={"email": "patterns@example.com", "password": "password123"})
+    test_client.headers.update({"Authorization": f"Bearer {registration.json()['access_token']}"})
+    return test_client
 
 
 def test_seed_initial_patterns(pattern_service, test_repo, test_doc_store):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import uuid
@@ -11,7 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -64,7 +65,8 @@ class ProjectUpdateRequest(BaseModel):
 
 
 class RequirementsWorkflowRequest(BaseModel):
-    brd_id: str
+    document_ids: List[str] = []
+    brd_id: Optional[str] = None
 
 
 class WorkflowResumeRequest(BaseModel):
@@ -93,6 +95,9 @@ def create_app(
     filestore = FileStore()
     patterns_svc = pattern_service or PatternService(repository=artifacts, document_store=documents)
     patterns_svc.seed_initial_patterns()
+
+    def interrupt_values(result: Dict[str, Any]) -> list[Any]:
+        return [item.value if hasattr(item, "value") else item for item in result.get("__interrupt__", [])]
 
     @app.post("/auth/register", status_code=201)
     async def register(request: AuthRequest) -> Dict[str, Any]:
@@ -168,12 +173,22 @@ def create_app(
         suffix = os.path.splitext(filename)[1].lower()
         if not suffix or suffix not in SUPPORTED_EXTENSIONS:
             raise HTTPException(status_code=400, detail=f"Unsupported file format '{suffix}'. Supported: {sorted(SUPPORTED_EXTENSIONS)}")
+        allowed_mime = {".pdf": "application/pdf", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".md": {"text/markdown", "text/plain"}, ".markdown": {"text/markdown", "text/plain"}, ".txt": {"text/plain", "text/markdown"}}
+        declared = (file.content_type or "").lower()
+        accepted = allowed_mime.get(suffix)
+        if declared and ((isinstance(accepted, set) and declared not in accepted) or (isinstance(accepted, str) and declared != accepted)):
+            raise HTTPException(status_code=415, detail=f"MIME type '{declared}' is not valid for '{suffix}'")
 
         content = await file.read(MAX_UPLOAD_BYTES + 1)
         if len(content) > MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail=f"Document exceeds maximum upload size of {MAX_UPLOAD_BYTES} bytes")
         if not content or not content.strip():
             raise HTTPException(status_code=400, detail="The uploaded document is empty")
+
+        content_hash = hashlib.sha256(content).hexdigest()
+        existing = artifacts.get_document_by_hash(project_id, content_hash)
+        if existing:
+            return JSONResponse(status_code=200, content=existing)
 
         document_id = "DOC-" + uuid.uuid4().hex[:12].upper()
         try:
@@ -199,15 +214,16 @@ def create_app(
                 status="COMPLETED",
                 section_count=len(sections),
                 chunk_count=len(chunks),
+                content_hash=content_hash,
             )
             artifacts.save_document_sections_and_chunks(document_id, project_id, sections_data, chunks_data)
             documents.add_chunks(document_id, project_id, chunks_data)
             return doc_record
         except ValueError as exc:
-            artifacts.save_document(project_id=project_id, document_id=document_id, filename=filename, file_type=suffix, storage_path="", status="FAILED", error_message=str(exc))
+            artifacts.save_document(project_id=project_id, document_id=document_id, filename=filename, file_type=suffix, storage_path="", status="FAILED", error_message=str(exc), content_hash=content_hash)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
-            artifacts.save_document(project_id=project_id, document_id=document_id, filename=filename, file_type=suffix, storage_path="", status="FAILED", error_message=str(exc))
+            artifacts.save_document(project_id=project_id, document_id=document_id, filename=filename, file_type=suffix, storage_path="", status="FAILED", error_message=str(exc), content_hash=content_hash)
             raise HTTPException(status_code=422, detail=f"Document processing failed: {exc}") from exc
 
     @app.get("/projects/{project_id}/documents/{document_id}")
@@ -230,16 +246,20 @@ def create_app(
     async def start_requirements_workflow(project_id: str, request: RequirementsWorkflowRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
         try:
             artifacts.get_project(project_id, user_id)
-            artifacts.get_requirements_model(request.brd_id)
-            run = artifacts.create_workflow_run(project_id, request.brd_id)
-            result = workflow.start(project_id, run["run_id"], request.brd_id)
+            brd_id = request.brd_id
+            if not brd_id:
+                raise HTTPException(status_code=422, detail="document_ids currently require a BRD model created by /api/brd/upload; provide brd_id for the legacy extraction handoff")
+            artifacts.get_requirements_model(brd_id)
+            run = artifacts.create_workflow_run(project_id, brd_id)
+            result = workflow.start(project_id, run["run_id"], brd_id)
             interrupted = bool(result.get("__interrupt__"))
             status = "PAUSED" if interrupted else result.get("status", "COMPLETED")
             artifacts.update_workflow_run(project_id, run["run_id"], status)
             artifacts.record_workflow_event(project_id, run["run_id"], "clarification_required" if interrupted else "workflow_completed", {"interrupted": interrupted})
-            return {**run, "status": status, "interrupt": result.get("__interrupt__", [])}
+            return JSONResponse(status_code=202, headers={"Location": f"/projects/{project_id}/runs/{run['run_id']}"}, content={**run, "status": status, "interrupt": interrupt_values(result)})
         except PersistenceError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            code = 409 if "active workflow run" in str(exc) else 404
+            raise HTTPException(status_code=code, detail=str(exc)) from exc
         except Exception as exc:
             logger.exception("requirements workflow failed")
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -262,7 +282,7 @@ def create_app(
             status = "PAUSED" if interrupted else result.get("status", "COMPLETED")
             artifacts.update_workflow_run(project_id, run_id, status)
             artifacts.record_workflow_event(project_id, run_id, "approval_required" if interrupted and result.get("__interrupt__") and "approval_request" in str(result["__interrupt__"]) else "workflow_progress", {"interrupted": interrupted})
-            return {"run_id": run_id, "status": status, "interrupt": result.get("__interrupt__", []), "state": result}
+            return {"run_id": run_id, "status": status, "interrupt": interrupt_values(result), "state": {k: v for k, v in result.items() if k != "__interrupt__"}}
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
@@ -272,6 +292,22 @@ def create_app(
     @app.post("/projects/{project_id}/runs/{run_id}/approval")
     async def approval_response(project_id: str, run_id: str, request: WorkflowResumeRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
         return await resume_workflow(project_id, run_id, request, user_id)
+
+    @app.post("/projects/{project_id}/runs/{run_id}/clarifications")
+    async def clarification_fallback(project_id: str, run_id: str, request: WorkflowResumeRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        payload = request.payload
+        if isinstance(payload, dict) and payload.get("type") == "clarification_response":
+            payload = [{"question_id": item.get("id"), "answer": item.get("answer", "")} for item in payload.get("answers", [])]
+        return await resume_workflow(project_id, run_id, WorkflowResumeRequest(payload=payload), user_id)
+
+    @app.post("/projects/{project_id}/runs/{run_id}/approve")
+    async def approve_run(project_id: str, run_id: str, request: WorkflowResumeRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        return await resume_workflow(project_id, run_id, WorkflowResumeRequest(payload={"decision": "APPROVE"}), user_id)
+
+    @app.post("/projects/{project_id}/runs/{run_id}/reject")
+    async def reject_run(project_id: str, run_id: str, request: WorkflowResumeRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        feedback = request.payload.get("feedback", "") if isinstance(request.payload, dict) else str(request.payload)
+        return await resume_workflow(project_id, run_id, WorkflowResumeRequest(payload={"decision": "REJECT", "feedback": feedback}), user_id)
 
     @app.get("/projects/{project_id}/runs/{run_id}/events")
     async def workflow_events(project_id: str, run_id: str, user_id: str = Depends(current_user)) -> StreamingResponse:
@@ -294,6 +330,28 @@ def create_app(
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         return HealthResponse(status="ok", milestone="BRD ingestion")
+
+    @app.get("/healthz")
+    async def healthz() -> Dict[str, Any]:
+        checks: Dict[str, str] = {}
+        try:
+            with artifacts.connection() as db:
+                db.execute("SELECT 1").fetchone()
+            checks["sqlite"] = "ok"
+        except Exception as exc:
+            checks["sqlite"] = f"error: {exc}"
+        try:
+            documents._get_collection().count()
+            checks["chromadb"] = "ok"
+        except Exception as exc:
+            checks["chromadb"] = f"error: {exc}"
+        try:
+            Path(os.getenv("DATA_ROOT", "data")).mkdir(parents=True, exist_ok=True)
+            checks["filesystem"] = "ok"
+        except Exception as exc:
+            checks["filesystem"] = f"error: {exc}"
+        healthy = all(value == "ok" for value in checks.values())
+        return JSONResponse(status_code=200 if healthy else 503, content={"status": "ok" if healthy else "degraded", "checks": checks})
 
     @app.post("/api/brd/upload", response_model=RequirementsModel, responses={400: {"model": ErrorResponse}, 413: {"model": ErrorResponse}, 422: {"model": ErrorResponse}, 502: {"model": ErrorResponse}})
     async def upload_brd(file: UploadFile = File(...), project_id: Optional[str] = None) -> RequirementsModel:
@@ -455,7 +513,6 @@ def create_app(
 
     @app.websocket("/projects/{project_id}/runs/{run_id}/hitl")
     async def project_run_hitl(websocket: WebSocket, project_id: str, run_id: str) -> None:
-        await websocket.accept()
         try:
             token = websocket.query_params.get("access_token")
             if not token:
@@ -464,21 +521,41 @@ def create_app(
             user_id = decode_token(token)
             artifacts.get_project(project_id, user_id)
             artifacts.get_workflow_run(project_id, run_id)
-            await websocket.send_json({"type": "resumed", "project_id": project_id, "run_id": run_id})
-            message = await websocket.receive_json()
-            result = workflow.resume(run_id, message.get("payload", message))
-            interrupted = bool(result.get("__interrupt__"))
-            artifacts.update_workflow_run(project_id, run_id, "PAUSED" if interrupted else result.get("status", "COMPLETED"))
-            await websocket.send_json({"type": "approval_request" if interrupted and "approval_request" in str(result.get("__interrupt__")) else "clarification_request" if interrupted else "completed", "run_id": run_id, "interrupt": result.get("__interrupt__", []), "state": result})
+            await websocket.accept()
+            pending = workflow.pending_interrupt(run_id)
+            if pending:
+                await websocket.send_json(pending)
+            while True:
+                message = await websocket.receive_json()
+                message_type = message.get("type")
+                if message_type == "clarification_response":
+                    payload = [{"question_id": item.get("id"), "answer": item.get("answer", "")} for item in message.get("answers", [])]
+                elif message_type == "approval_response":
+                    payload = {"decision": message.get("decision", ""), "feedback": message.get("feedback", "")}
+                else:
+                    await websocket.send_json({"type": "error", "code": "invalid_message", "message": "Expected clarification_response or approval_response"})
+                    continue
+                result = workflow.resume(run_id, payload)
+                interrupted = bool(result.get("__interrupt__"))
+                status = "PAUSED" if interrupted else result.get("status", "COMPLETED")
+                artifacts.update_workflow_run(project_id, run_id, status)
+                if interrupted:
+                    await websocket.send_json(interrupt_values(result)[0])
+                else:
+                    await websocket.send_json({"type": "completed", "run_id": run_id, "status": status})
+                    break
         except WebSocketDisconnect:
             return
         except Exception as exc:
-            await websocket.send_json({"type": "error", "detail": str(exc)})
+            try:
+                await websocket.close(code=1008, reason=str(exc))
+            except Exception:
+                return
 
     # Pattern Knowledge Base Endpoints
 
     @app.post("/patterns", status_code=201, response_model=PatternModel)
-    async def create_pattern(request: PatternCreateRequest) -> PatternModel:
+    async def create_pattern(request: PatternCreateRequest, user_id: str = Depends(current_user)) -> PatternModel:
         try:
             return patterns_svc.create_pattern(request)
         except PersistenceError as exc:
@@ -487,8 +564,22 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/patterns/bulk", status_code=201, response_model=List[PatternModel])
-    async def bulk_create_patterns(items: List[PatternCreateRequest]) -> List[PatternModel]:
+    async def bulk_create_patterns(request: Request, user_id: str = Depends(current_user)) -> List[PatternModel]:
         try:
+            content_type = (request.headers.get("content-type") or "").lower()
+            if "multipart/form-data" in content_type:
+                form = await request.form()
+                upload = form.get("file")
+                if upload is None:
+                    raise HTTPException(status_code=422, detail="multipart bulk upload requires a file field")
+                import yaml
+                raw = yaml.safe_load(await upload.read())
+            elif "yaml" in content_type or "yml" in content_type:
+                import yaml
+                raw = yaml.safe_load(await request.body())
+            else:
+                raw = await request.json()
+            items = [PatternCreateRequest.model_validate(item) for item in (raw.get("patterns", raw) if isinstance(raw, dict) else raw)]
             return patterns_svc.bulk_create_patterns(items)
         except PersistenceError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -496,25 +587,25 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/patterns/search", response_model=List[PatternSearchResult])
-    async def search_patterns(request: PatternSearchRequest) -> List[PatternSearchResult]:
+    async def search_patterns(request: PatternSearchRequest, user_id: str = Depends(current_user)) -> List[PatternSearchResult]:
         try:
             return patterns_svc.search_patterns(request)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/patterns", response_model=List[PatternModel])
-    async def list_patterns(tag: Optional[str] = None) -> List[PatternModel]:
+    async def list_patterns(tag: Optional[str] = None, user_id: str = Depends(current_user)) -> List[PatternModel]:
         return patterns_svc.list_patterns(tag=tag)
 
     @app.get("/patterns/{pattern_id}", response_model=PatternModel)
-    async def get_pattern(pattern_id: str) -> PatternModel:
+    async def get_pattern(pattern_id: str, user_id: str = Depends(current_user)) -> PatternModel:
         try:
             return patterns_svc.get_pattern(pattern_id)
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=f"Pattern '{pattern_id}' not found") from exc
 
     @app.patch("/patterns/{pattern_id}", response_model=PatternModel)
-    async def update_pattern(pattern_id: str, request: PatternUpdateRequest) -> PatternModel:
+    async def update_pattern(pattern_id: str, request: PatternUpdateRequest, user_id: str = Depends(current_user)) -> PatternModel:
         try:
             return patterns_svc.update_pattern(pattern_id, request)
         except PersistenceError as exc:
@@ -523,7 +614,7 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.delete("/patterns/{pattern_id}", response_model=PatternModel)
-    async def delete_pattern(pattern_id: str) -> PatternModel:
+    async def delete_pattern(pattern_id: str, user_id: str = Depends(current_user)) -> PatternModel:
         try:
             return patterns_svc.delete_pattern(pattern_id)
         except PersistenceError as exc:
@@ -531,7 +622,8 @@ def create_app(
 
     @app.exception_handler(HTTPException)
     async def http_error_handler(_, exc: HTTPException) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"error": "brd_ingestion_failed", "detail": str(exc.detail)})
+        message = str(exc.detail)
+        return JSONResponse(status_code=exc.status_code, content={"error": "brd_ingestion_failed", "detail": message, "details": {"code": f"http_{exc.status_code}", "message": message}})
 
     return app
 

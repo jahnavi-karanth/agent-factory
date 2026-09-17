@@ -216,6 +216,7 @@ class SQLiteRepository:
                     error_message TEXT,
                     section_count INTEGER NOT NULL DEFAULT 0,
                     chunk_count INTEGER NOT NULL DEFAULT 0,
+                    content_hash TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -309,6 +310,10 @@ class SQLiteRepository:
                 db.execute("ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'")
             if "updated_at" not in columns:
                 db.execute("ALTER TABLE projects ADD COLUMN updated_at TEXT")
+            document_columns = [col["name"] for col in db.execute("PRAGMA table_info(documents)").fetchall()]
+            if "content_hash" not in document_columns:
+                db.execute("ALTER TABLE documents ADD COLUMN content_hash TEXT")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_project_hash ON documents(project_id, content_hash) WHERE content_hash IS NOT NULL")
             db.commit()
 
     def save_requirements_model(self, model: RequirementsModel, content: str, file_type: str) -> int:
@@ -614,24 +619,29 @@ class SQLiteRepository:
         error_message: Optional[str] = None,
         section_count: int = 0,
         chunk_count: int = 0,
+        content_hash: Optional[str] = None,
     ) -> Dict[str, Any]:
         now = utc_now()
         with self.connection() as db:
             db.execute(
-                "INSERT INTO documents(document_id,project_id,filename,file_type,storage_path,status,error_message,section_count,chunk_count,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET status=excluded.status,error_message=excluded.error_message,"
+                "INSERT INTO documents(document_id,project_id,filename,file_type,storage_path,status,error_message,section_count,chunk_count,content_hash,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET status=excluded.status,error_message=excluded.error_message,"
                 "section_count=excluded.section_count,chunk_count=excluded.chunk_count,updated_at=excluded.updated_at",
-                (document_id, project_id, filename, file_type, storage_path, status, error_message, section_count, chunk_count, now, now),
+                (document_id, project_id, filename, file_type, storage_path, status, error_message, section_count, chunk_count, content_hash, now, now),
             )
             db.commit()
         return self.get_document(project_id, document_id)
 
     def get_document(self, project_id: str, document_id: str) -> Dict[str, Any]:
         with self.connection() as db:
-            row = db.execute("SELECT document_id,project_id,filename,file_type,storage_path,status,error_message,section_count,chunk_count,created_at,updated_at FROM documents WHERE project_id=? AND document_id=?", (project_id, document_id)).fetchone()
+            row = db.execute("SELECT document_id,project_id,filename,file_type,storage_path,status,error_message,section_count,chunk_count,content_hash,created_at,updated_at FROM documents WHERE project_id=? AND document_id=?", (project_id, document_id)).fetchone()
             if not row:
                 raise PersistenceError(f"document {document_id} not found in project {project_id}")
             return dict(row)
+    def get_document_by_hash(self, project_id: str, content_hash: str) -> Optional[Dict[str, Any]]:
+        with self.connection() as db:
+            row = db.execute("SELECT document_id,project_id,filename,file_type,storage_path,status,error_message,section_count,chunk_count,content_hash,created_at,updated_at FROM documents WHERE project_id=? AND content_hash=?", (project_id, content_hash)).fetchone()
+            return dict(row) if row else None
 
     def save_document_sections_and_chunks(self, document_id: str, project_id: str, sections: list[Dict[str, Any]], chunks: list[Dict[str, Any]]) -> None:
         now = utc_now()
@@ -667,6 +677,10 @@ class SQLiteRepository:
     def create_workflow_run(self, project_id: str, brd_id: str) -> Dict[str, Any]:
         import uuid
         self.get_project(project_id)
+        with self.connection() as db:
+            active = db.execute("SELECT run_id FROM workflow_runs WHERE project_id=? AND status IN ('STARTING','RUNNING','PAUSED') ORDER BY created_at DESC LIMIT 1", (project_id,)).fetchone()
+            if active:
+                raise PersistenceError(f"active workflow run already exists: {active['run_id']}")
         run_id = "RUN-" + uuid.uuid4().hex[:12].upper()
         now = utc_now()
         with self.connection() as db:
@@ -862,4 +876,3 @@ class SQLiteRepository:
             db.execute("DELETE FROM patterns WHERE pattern_id=?", (p_id,))
             db.commit()
         return existing
-

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional, TypedDict
 
@@ -84,6 +85,10 @@ class RequirementsWorkflow:
     def resume(self, run_id: str, payload: Any) -> Dict[str, Any]:
         return self.graph().invoke(Command(resume=payload), config=self.config(run_id))
 
+    def pending_interrupt(self, run_id: str) -> Any:
+        snapshot = self.graph().get_state(self.config(run_id))
+        return snapshot.tasks[0].interrupts[0].value if snapshot.tasks and snapshot.tasks[0].interrupts else None
+
     def load_validate_input(self, state: RequirementsWorkflowState) -> Dict[str, Any]:
         model, version_id = self.repository.get_requirements_model(state["brd_id"])
         return {"model_version_id": version_id, "requirements": model.model_dump(mode="json"), "status": "INPUT_LOADED"}
@@ -102,7 +107,7 @@ class RequirementsWorkflow:
         answered = {item.get("question_id") for item in answers}
         pending = [item for item in questions if item.get("question_id") not in answered]
         if pending:
-            response = interrupt({"type": "clarification_request", "run_id": state["run_id"], "questions": pending, "answers": answers, "follow_up_round": state.get("follow_up_round", 0)})
+            response = interrupt({"type": "clarification_request", "request_id": f"{state['run_id']}:clarification:{state.get('follow_up_round', 0)}", "run_id": state["run_id"], "questions": pending, "answers": answers, "follow_up_round": state.get("follow_up_round", 0)})
             incoming = response if isinstance(response, list) else [response]
             return {"human_answers": answers + [item for item in incoming if isinstance(item, dict)], "status": "CLARIFICATION_RECEIVED"}
         return {"status": "CLARIFICATION_COMPLETED"}
@@ -135,7 +140,7 @@ class RequirementsWorkflow:
         return {"resolved_requirements": resolved.model_dump(mode="json"), "status": "RESOLVED"}
 
     def approval_gate(self, state: RequirementsWorkflowState) -> Dict[str, Any]:
-        response = interrupt({"type": "approval_request", "run_id": state["run_id"], "requirements": state["resolved_requirements"], "revision_count": state.get("revision_count", 0)})
+        response = interrupt({"type": "approval_request", "request_id": f"{state['run_id']}:approval:{state.get('revision_count', 0)}", "run_id": state["run_id"], "requirements": state["resolved_requirements"], "revision_count": state.get("revision_count", 0)})
         decision = response if isinstance(response, dict) else {"decision": str(response)}
         normalized = str(decision.get("decision", "")).upper()
         if normalized == "REJECT":
