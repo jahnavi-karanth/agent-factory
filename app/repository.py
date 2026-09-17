@@ -272,6 +272,22 @@ class SQLiteRepository:
                     json_path TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS patterns (
+                    pattern_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    intent TEXT NOT NULL,
+                    structure_json TEXT NOT NULL,
+                    when_to_use_json TEXT NOT NULL,
+                    when_not_to_use_json TEXT NOT NULL,
+                    prerequisites_json TEXT NOT NULL,
+                    references_json TEXT NOT NULL,
+                    tags_json TEXT NOT NULL,
+                    description TEXT,
+                    strengths_json TEXT,
+                    weaknesses_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_hitl_analysis ON hitl_sessions(analysis_id);
                 CREATE INDEX IF NOT EXISTS idx_models_brd ON requirements_models(brd_id, version);
                 CREATE INDEX IF NOT EXISTS idx_requirements_id ON requirements(requirement_id);
@@ -284,6 +300,7 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_sections_doc ON document_sections(document_id);
                 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(document_id);
+                CREATE INDEX IF NOT EXISTS idx_patterns_name ON patterns(name);
                 """
             )
             # Ensure migration columns for projects if created with older schema
@@ -710,3 +727,139 @@ class SQLiteRepository:
             if not row:
                 raise PersistenceError(f"no artifacts found for run_id {run_id}")
             return dict(row)
+
+    def _row_to_pattern(self, row: sqlite3.Row) -> Dict[str, Any]:
+        d = dict(row)
+        return {
+            "id": d["pattern_id"],
+            "name": d["name"],
+            "intent": d["intent"],
+            "structure": json.loads(d["structure_json"]),
+            "when_to_use": json.loads(d["when_to_use_json"]),
+            "when_not_to_use": json.loads(d["when_not_to_use_json"]),
+            "prerequisites": json.loads(d["prerequisites_json"]),
+            "references": json.loads(d["references_json"]),
+            "tags": json.loads(d["tags_json"]),
+            "description": d.get("description"),
+            "strengths": json.loads(d["strengths_json"]) if d.get("strengths_json") else None,
+            "weaknesses": json.loads(d["weaknesses_json"]) if d.get("weaknesses_json") else None,
+            "created_at": d["created_at"],
+            "updated_at": d["updated_at"],
+        }
+
+    def save_pattern(
+        self,
+        pattern_id: str,
+        name: str,
+        intent: str,
+        structure: Any,
+        when_to_use: list,
+        when_not_to_use: list,
+        prerequisites: list,
+        references: list,
+        tags: list,
+        description: Optional[str] = None,
+        strengths: Optional[list] = None,
+        weaknesses: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        now = utc_now()
+        struct_json = json.dumps(structure) if isinstance(structure, (list, dict)) else json.dumps(structure)
+        try:
+            with self.connection() as db:
+                db.execute(
+                    "INSERT INTO patterns(pattern_id,name,intent,structure_json,when_to_use_json,when_not_to_use_json,prerequisites_json,references_json,tags_json,description,strengths_json,weaknesses_json,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(pattern_id) DO UPDATE SET name=excluded.name,intent=excluded.intent,structure_json=excluded.structure_json,when_to_use_json=excluded.when_to_use_json,when_not_to_use_json=excluded.when_not_to_use_json,prerequisites_json=excluded.prerequisites_json,references_json=excluded.references_json,tags_json=excluded.tags_json,description=excluded.description,strengths_json=excluded.strengths_json,weaknesses_json=excluded.weaknesses_json,updated_at=excluded.updated_at",
+                    (
+                        pattern_id,
+                        name,
+                        intent,
+                        struct_json,
+                        json.dumps(when_to_use or []),
+                        json.dumps(when_not_to_use or []),
+                        json.dumps(prerequisites or []),
+                        json.dumps(references or []),
+                        json.dumps(tags or []),
+                        description,
+                        json.dumps(strengths) if strengths is not None else None,
+                        json.dumps(weaknesses) if weaknesses is not None else None,
+                        now,
+                        now,
+                    ),
+                )
+                db.commit()
+            return self.get_pattern(pattern_id)
+        except sqlite3.IntegrityError as exc:
+            raise PersistenceError(f"pattern with name '{name}' already exists") from exc
+
+    def get_pattern(self, pattern_id: str) -> Dict[str, Any]:
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM patterns WHERE pattern_id=? OR name=?", (pattern_id, pattern_id)).fetchone()
+            if not row:
+                raise PersistenceError(f"pattern {pattern_id} not found")
+            return self._row_to_pattern(row)
+
+    def get_pattern_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM patterns WHERE LOWER(name)=LOWER(?)", (name,)).fetchone()
+            return self._row_to_pattern(row) if row else None
+
+    def list_patterns(self, tag: Optional[str] = None) -> list[Dict[str, Any]]:
+        with self.connection() as db:
+            rows = db.execute("SELECT * FROM patterns ORDER BY created_at ASC").fetchall()
+            results = [self._row_to_pattern(row) for row in rows]
+            if tag:
+                clean_tag = tag.lower().strip()
+                results = [p for p in results if any(clean_tag == t.lower().strip() for t in p.get("tags", []))]
+            return results
+
+    def update_pattern(self, pattern_id: str, **kwargs) -> Dict[str, Any]:
+        existing = self.get_pattern(pattern_id)
+        now = utc_now()
+        p_id = existing["id"]
+        
+        name = kwargs.get("name") if kwargs.get("name") is not None else existing["name"]
+        intent = kwargs.get("intent") if kwargs.get("intent") is not None else existing["intent"]
+        structure = kwargs.get("structure") if kwargs.get("structure") is not None else existing["structure"]
+        when_to_use = kwargs.get("when_to_use") if kwargs.get("when_to_use") is not None else existing["when_to_use"]
+        when_not_to_use = kwargs.get("when_not_to_use") if kwargs.get("when_not_to_use") is not None else existing["when_not_to_use"]
+        prerequisites = kwargs.get("prerequisites") if kwargs.get("prerequisites") is not None else existing["prerequisites"]
+        references = kwargs.get("references") if kwargs.get("references") is not None else existing["references"]
+        tags = kwargs.get("tags") if kwargs.get("tags") is not None else existing["tags"]
+        description = kwargs.get("description") if "description" in kwargs else existing.get("description")
+        strengths = kwargs.get("strengths") if "strengths" in kwargs else existing.get("strengths")
+        weaknesses = kwargs.get("weaknesses") if "weaknesses" in kwargs else existing.get("weaknesses")
+
+        try:
+            with self.connection() as db:
+                db.execute(
+                    "UPDATE patterns SET name=?,intent=?,structure_json=?,when_to_use_json=?,when_not_to_use_json=?,prerequisites_json=?,references_json=?,tags_json=?,description=?,strengths_json=?,weaknesses_json=?,updated_at=? WHERE pattern_id=?",
+                    (
+                        name,
+                        intent,
+                        json.dumps(structure),
+                        json.dumps(when_to_use),
+                        json.dumps(when_not_to_use),
+                        json.dumps(prerequisites),
+                        json.dumps(references),
+                        json.dumps(tags),
+                        description,
+                        json.dumps(strengths) if strengths is not None else None,
+                        json.dumps(weaknesses) if weaknesses is not None else None,
+                        now,
+                        p_id,
+                    ),
+                )
+                db.commit()
+            return self.get_pattern(p_id)
+        except sqlite3.IntegrityError as exc:
+            raise PersistenceError(f"pattern name '{name}' is already taken by another pattern") from exc
+
+    def delete_pattern(self, pattern_id: str) -> Dict[str, Any]:
+        existing = self.get_pattern(pattern_id)
+        p_id = existing["id"]
+        with self.connection() as db:
+            db.execute("DELETE FROM patterns WHERE pattern_id=?", (p_id,))
+            db.commit()
+        return existing
+

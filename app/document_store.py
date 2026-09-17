@@ -73,3 +73,80 @@ class DocumentStore:
         result = self._get_collection().query(query_embeddings=[self._embedding(query)], n_results=limit, where={"project_id": project_id})
         return [{"id": item_id, "document": document, "metadata": metadata} for item_id, document, metadata in zip(result.get("ids", [[]])[0], result.get("documents", [[]])[0], result.get("metadatas", [[]])[0])]
 
+    def _get_patterns_collection(self):
+        import chromadb
+        client = chromadb.PersistentClient(path=self.path)
+        return client.get_or_create_collection("patterns", metadata={"hnsw:space": "cosine"})
+
+    @staticmethod
+    def construct_pattern_embedding_text(intent: str, structure: Any, when_to_use: list[str]) -> str:
+        struct_text = "\n".join(f"- {s}" for s in structure) if isinstance(structure, list) else str(structure)
+        wtu_text = "\n".join(f"- {w}" for w in when_to_use) if isinstance(when_to_use, list) else str(when_to_use)
+        return f"Intent:\n{intent}\n\nStructure:\n{struct_text}\n\nWhen to use:\n{wtu_text}".strip()
+
+    def add_pattern_vector(
+        self,
+        pattern_id: str,
+        name: str,
+        intent: str,
+        structure: Any,
+        when_to_use: list[str],
+        tags: list[str],
+        references: list[str],
+    ) -> None:
+        collection = self._get_patterns_collection()
+        embedding_text = self.construct_pattern_embedding_text(intent, structure, when_to_use)
+        metadata = {
+            "pattern_id": pattern_id,
+            "name": name,
+            "tags": ",".join(tags or []),
+            "source": references[0] if references else "canonical",
+        }
+        collection.upsert(ids=[pattern_id], documents=[embedding_text], embeddings=[self._embedding(embedding_text)], metadatas=[metadata])
+
+    def delete_pattern_vector(self, pattern_id: str) -> None:
+        try:
+            collection = self._get_patterns_collection()
+            collection.delete(ids=[pattern_id])
+        except Exception:
+            pass
+
+    def search_patterns(self, query: str, tags: Optional[list[str]] = None, top_k: int = 8) -> list[Dict[str, Any]]:
+        collection = self._get_patterns_collection()
+        count = collection.count()
+        if count == 0:
+            return []
+
+        limit = min(max(1, top_k), min(count, 50))
+        result = collection.query(
+            query_embeddings=[self._embedding(query)],
+            n_results=limit,
+            include=["documents", "metadatas", "distances"],
+        )
+
+        ids = result.get("ids", [[]])[0]
+        docs = result.get("documents", [[]])[0]
+        metadatas = result.get("metadatas", [[]])[0]
+        distances = result.get("distances", [[]])[0]
+
+        hits = []
+        clean_tags = [t.lower().strip() for t in (tags or []) if t.strip()]
+
+        for item_id, doc, meta, dist in zip(ids, docs, metadatas, distances):
+            item_tags = [t.lower().strip() for t in meta.get("tags", "").split(",") if t.strip()]
+            if clean_tags and not any(ct in item_tags for ct in clean_tags):
+                continue
+            similarity_score = round(1.0 / (1.0 + max(0.0, float(dist))), 4)
+            hits.append({
+                "pattern_id": item_id,
+                "name": meta.get("name", item_id),
+                "distance": float(dist),
+                "score": similarity_score,
+                "metadata": meta,
+                "document": doc,
+            })
+
+        hits.sort(key=lambda x: x["score"], reverse=True)
+        return hits[:limit]
+
+

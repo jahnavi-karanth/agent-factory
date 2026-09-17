@@ -5,7 +5,7 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
 
@@ -26,6 +26,14 @@ from .workflow import RequirementsWorkflow
 from .document_store import DocumentStore
 from .auth import create_token, current_user, decode_token, hash_password, verify_password
 from .filestore import FileStore
+from .pattern_models import (
+    PatternCreateRequest,
+    PatternModel,
+    PatternSearchRequest,
+    PatternSearchResult,
+    PatternUpdateRequest,
+)
+from .pattern_service import PatternService
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -69,7 +77,13 @@ class AuthRequest(BaseModel):
 
 
 
-def create_app(service: Optional[IngestionService] = None, analyzer: Optional[RequirementsAnalyzer] = None, repository: Optional[SQLiteRepository] = None, document_store: Optional[DocumentStore] = None) -> FastAPI:
+def create_app(
+    service: Optional[IngestionService] = None,
+    analyzer: Optional[RequirementsAnalyzer] = None,
+    repository: Optional[SQLiteRepository] = None,
+    document_store: Optional[DocumentStore] = None,
+    pattern_service: Optional[PatternService] = None,
+) -> FastAPI:
     app = FastAPI(title="AI Software Development Factory", version="0.1.0", description="Milestone 1: generic BRD ingestion")
     ingestion = service or IngestionService()
     requirements_analyzer = analyzer or RequirementsAnalyzer()
@@ -77,6 +91,8 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
     workflow = RequirementsWorkflow(artifacts, requirements_analyzer)
     documents = document_store or DocumentStore()
     filestore = FileStore()
+    patterns_svc = pattern_service or PatternService(repository=artifacts, document_store=documents)
+    patterns_svc.seed_initial_patterns()
 
     @app.post("/auth/register", status_code=201)
     async def register(request: AuthRequest) -> Dict[str, Any]:
@@ -458,6 +474,60 @@ def create_app(service: Optional[IngestionService] = None, analyzer: Optional[Re
             return
         except Exception as exc:
             await websocket.send_json({"type": "error", "detail": str(exc)})
+
+    # Pattern Knowledge Base Endpoints
+
+    @app.post("/patterns", status_code=201, response_model=PatternModel)
+    async def create_pattern(request: PatternCreateRequest) -> PatternModel:
+        try:
+            return patterns_svc.create_pattern(request)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/patterns/bulk", status_code=201, response_model=List[PatternModel])
+    async def bulk_create_patterns(items: List[PatternCreateRequest]) -> List[PatternModel]:
+        try:
+            return patterns_svc.bulk_create_patterns(items)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/patterns/search", response_model=List[PatternSearchResult])
+    async def search_patterns(request: PatternSearchRequest) -> List[PatternSearchResult]:
+        try:
+            return patterns_svc.search_patterns(request)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/patterns", response_model=List[PatternModel])
+    async def list_patterns(tag: Optional[str] = None) -> List[PatternModel]:
+        return patterns_svc.list_patterns(tag=tag)
+
+    @app.get("/patterns/{pattern_id}", response_model=PatternModel)
+    async def get_pattern(pattern_id: str) -> PatternModel:
+        try:
+            return patterns_svc.get_pattern(pattern_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=f"Pattern '{pattern_id}' not found") from exc
+
+    @app.patch("/patterns/{pattern_id}", response_model=PatternModel)
+    async def update_pattern(pattern_id: str, request: PatternUpdateRequest) -> PatternModel:
+        try:
+            return patterns_svc.update_pattern(pattern_id, request)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=f"Pattern '{pattern_id}' not found") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/patterns/{pattern_id}", response_model=PatternModel)
+    async def delete_pattern(pattern_id: str) -> PatternModel:
+        try:
+            return patterns_svc.delete_pattern(pattern_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=f"Pattern '{pattern_id}' not found") from exc
 
     @app.exception_handler(HTTPException)
     async def http_error_handler(_, exc: HTTPException) -> JSONResponse:

@@ -6,6 +6,7 @@ This repository implements the **AI Software Development Factory** backend:
 - **Milestone 1**: Project management, authentication, FileStore file storage, multi-format document ingestion (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.md`, `.txt`), parsing, section/chunk extraction, SQLite persistence, ChromaDB vector store embeddings with mandatory `project_id` metadata and isolation, and document status/sections APIs.
 - **Milestone 2**: Requirements Analysis, quality status classification (`INVALID`, `NEEDS_REWORK`, `READY_FOR_CLARIFICATION`, `READY`), gap/ambiguity issue identification, and neutral clarification questions.
 - **Milestone 3**: Human-in-the-Loop (HITL) WebSocket clarification sessions, follow-up round generation, best-decision fallbacks, workflow runs, and event streams.
+- **Pattern Knowledge Base**: Global architectural & agentic pattern registry (source-of-truth in SQLite `patterns` table, semantic search index in ChromaDB `patterns` collection), startup idempotent seeding from `seed_patterns.json` (includes all 10 canonical patterns: ReAct, Reflection, Planner-Executor, Multi-Agent Debate, Router, RAG, Tool-Use, Hierarchical Agents, Critic-Refine, Map-Reduce), REST CRUD APIs, and tag-filtered semantic vector search.
 
 ---
 
@@ -43,7 +44,23 @@ This repository implements the **AI Software Development Factory** backend:
   - `GET /projects/{project_id}/documents/{document_id}/sections` (retrieves structured document sections)
 - **Official Milestone 1 Tests** ([`tests/test_m1_official.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/tests/test_m1_official.py)):
   - Added 9 comprehensive integration test functions covering authentication, project lifecycle & isolation, all 6 file formats, path traversal defense, document status, section structure, and ChromaDB project isolation search.
-  - All 84 tests in the test suite pass with zero regressions across M1, M2, and M3.
+
+### 3. Changes Made for Pattern Knowledge Base
+- **Pydantic Models** ([`app/pattern_models.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/pattern_models.py)):
+  - Defined `PatternModel`, `PatternCreateRequest`, `PatternUpdateRequest`, `PatternSearchRequest`, `PatternSearchResult`.
+- **Database Schema & Migration** ([`app/repository.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/repository.py), [`alembic/versions/0005_patterns_table.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/alembic/versions/0005_patterns_table.py)):
+  - Created relational `patterns` table in SQLite (`id`, `name`, `intent`, `structure`, `when_to_use`, `when_not_to_use`, `prerequisites`, `references`, `tags`, `description`, `strengths`, `weaknesses`, `created_at`, `updated_at`).
+  - Implemented repository methods: `save_pattern`, `get_pattern`, `get_pattern_by_name`, `list_patterns`, `update_pattern`, `delete_pattern`.
+- **Semantic Vector Indexing** ([`app/document_store.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/document_store.py)):
+  - Created ChromaDB `patterns` collection.
+  - Implemented deterministic embedding text construction (`intent + structure + when_to_use`), `add_pattern_vector`, `delete_pattern_vector`, and `search_patterns`.
+- **Pattern Service & Startup Seeding** ([`app/pattern_service.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/pattern_service.py)):
+  - Implemented idempotent startup pattern seeding from `seed_patterns.json` at root.
+  - Managed complete DB and Chroma synchronization on pattern creation, updates, deletions, and searches.
+- **REST Endpoints & Route Wiring** ([`app/main.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/main.py)):
+  - Registered `POST /patterns`, `POST /patterns/bulk`, `POST /patterns/search`, `GET /patterns`, `GET /patterns/{pattern_id}`, `PATCH /patterns/{pattern_id}`, `DELETE /patterns/{pattern_id}`.
+- **Test Suite** ([`tests/test_patterns.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/tests/test_patterns.py)):
+  - Added 6 test functions verifying startup seeding, CRUD operations, bulk creation, semantic vector search, tag filtering, and stale vector cleanup.
 
 ---
 
@@ -65,7 +82,14 @@ Client / Frontend
     │
     ├── GET /projects/{project_id}/documents/{document_id} -> Status & counts
     ├── GET /projects/{project_id}/documents/{document_id}/sections -> Section outline
-    └── GET /projects/{project_id}/documents/search?q=... -> Project-filtered vector search (where={"project_id": project_id})
+    ├── GET /projects/{project_id}/documents/search?q=... -> Project-filtered vector search (where={"project_id": project_id})
+    │
+    └── Pattern Knowledge Base (Global Resource):
+          ├── Startup Seeding -> Reads seed_patterns.json -> Synchronizes SQLite & ChromaDB
+          ├── POST /patterns & POST /patterns/bulk -> Create pattern(s)
+          ├── GET /patterns & GET /patterns/{id} -> List / fetch patterns from SQLite (source of truth)
+          ├── PATCH /patterns/{id} & DELETE /patterns/{id} -> Update / delete pattern & sync ChromaDB
+          └── POST /patterns/search -> Semantic search via ChromaDB (intent + structure + when_to_use)
 ```
 
 ---
@@ -138,77 +162,40 @@ Response:
 }
 ```
 
-### 2. Create and Manage Projects
+### 2. Pattern Knowledge Base APIs
 
 ```bash
-TOKEN="<jwt-token-string>"
+# List all patterns
+curl -X GET http://127.0.0.1:8000/patterns
 
-# Create Project
-curl -X POST http://127.0.0.1:8000/projects \
-  -H "Authorization: Bearer $TOKEN" \
+# List patterns by tag
+curl -X GET http://127.0.0.1:8000/patterns?tag=reasoning
+
+# Get pattern details by ID
+curl -X GET http://127.0.0.1:8000/patterns/PAT-001
+
+# Semantic search for patterns
+curl -X POST http://127.0.0.1:8000/patterns/search \
   -H "Content-Type: application/json" \
-  -d '{"name":"Expense Management Platform","status":"draft"}'
+  -d '{"query":"iterative reasoning with external tools","top_k":3}'
 
-# List Projects
-curl -X GET http://127.0.0.1:8000/projects \
-  -H "Authorization: Bearer $TOKEN"
-
-# Update Project Status to 'ready'
-curl -X PATCH http://127.0.0.1:8000/projects/PROJ-123456 \
-  -H "Authorization: Bearer $TOKEN" \
+# Create custom pattern
+curl -X POST http://127.0.0.1:8000/patterns \
   -H "Content-Type: application/json" \
-  -d '{"status":"ready"}'
-```
-
-### 3. Upload Project Document
-
-```bash
-curl -X POST http://127.0.0.1:8000/projects/PROJ-123456/documents \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "file=@'Business Requirements Document — Corporate Expense Management Platform.md';type=text/markdown"
-```
-
-Response:
-```json
-{
-  "document_id": "DOC-A1B2C3D4E5F6",
-  "project_id": "PROJ-123456",
-  "filename": "Business Requirements Document — Corporate Expense Management Platform.md",
-  "file_type": ".md",
-  "storage_path": "/.../data/projects/PROJ-123456/uploads/DOC-A1B2C3D4E5F6.md",
-  "status": "COMPLETED",
-  "error_message": null,
-  "section_count": 8,
-  "chunk_count": 24,
-  "created_at": "2026-09-15T12:00:00+00:00",
-  "updated_at": "2026-09-15T12:00:00+00:00"
-}
-```
-
-### 4. Check Document Status & Retrieve Sections
-
-```bash
-# Get Document Status
-curl -X GET http://127.0.0.1:8000/projects/PROJ-123456/documents/DOC-A1B2C3D4E5F6 \
-  -H "Authorization: Bearer $TOKEN"
-
-# Get Document Sections Outline
-curl -X GET http://127.0.0.1:8000/projects/PROJ-123456/documents/DOC-A1B2C3D4E5F6/sections \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-### 5. Project-Scoped Document Search
-
-```bash
-curl -X GET "http://127.0.0.1:8000/projects/PROJ-123456/documents/search?q=receipts" \
-  -H "Authorization: Bearer $TOKEN"
+  -d '{
+    "name": "Custom Agent Pattern",
+    "intent": "Solve multi-step tasks using specialized sub-agents",
+    "structure": ["Decompose", "Delegate", "Synthesize"],
+    "when_to_use": ["Complex modular workflows"],
+    "tags": ["multi-agent", "custom"]
+  }'
 ```
 
 ---
 
 ## Test Execution
 
-Run the complete test suite (84 tests):
+Run the complete test suite (90 tests):
 
 ```bash
 uv run pytest
