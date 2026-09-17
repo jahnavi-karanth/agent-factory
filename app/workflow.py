@@ -161,8 +161,18 @@ class RequirementsWorkflow:
         json_path = base / "Requirements.json"
         md_path = base / "Requirements.md"
         json_path.write_text(model.model_dump_json(indent=2), encoding="utf-8")
-        lines = [f"# {model.title or 'Requirements'}", "", f"BRD ID: {model.brd_id}", "", "## Requirements", ""]
-        lines.extend(f"- **{item.id}** ({item.type}): {item.description}" for item in model.requirements)
+        lines = [f"# {model.title or 'Requirements'}", "", f"BRD ID: {model.brd_id}", "", "## Goals", ""]
+        lines.extend(f"- {item}" for item in model.business_objectives or ([model.business_problem] if model.business_problem else ["Not specified"]))
+        lines.extend(["", "## Personas", ""])
+        lines.extend(f"- {item}" for item in (model.stakeholders + model.user_roles) or ["Not specified"])
+        lines.extend(["", "## Functional Requirements", ""])
+        lines.extend(f"- **{item.id}**: {item.description}" for item in model.requirements if item.type == "functional")
+        lines.extend(["", "## Non-Functional Requirements", ""])
+        lines.extend(f"- {item}" for item in model.non_functional_requirements or [item.description for item in model.requirements if item.type == "non_functional"] or ["Not specified"])
+        lines.extend(["", "## Constraints", ""])
+        lines.extend(f"- {item}" for item in model.constraints or ["Not specified"])
+        lines.extend(["", "## Out-of-Scope", "", "- Not specified", "", "## Open Questions", ""])
+        lines.extend(f"- {item}" for item in model.assumptions + model.success_criteria or ["Not specified"])
         md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.repository.record_workflow_event(state["project_id"], state["run_id"], "workflow_completed", {"requirements_json": str(json_path), "requirements_md": str(md_path)})
         self.repository.record_artifacts(state["project_id"], state["run_id"], str(md_path), str(json_path))
