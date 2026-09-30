@@ -161,15 +161,15 @@ def test_rest_workflow_project_run_scoping_and_execution(client):
     assert proj_resp.status_code == 201
     project_id = proj_resp.json()["project_id"]
     
-    # 2. Upload BRD linked to Project
+    # 2. Upload Document to Project
     content = "# Corporate Expense Management Platform\n- REQ-001: Expense\n- REQ-002: Approval"
-    brd = client.post(f"/api/brd/upload?project_id={project_id}", files={"file": ("brd.md", content, "text/markdown")}).json()
-    brd_id = brd["brd_id"]
+    doc_resp = client.post(f"/projects/{project_id}/documents", files={"file": ("brd.md", content.encode("utf-8"), "text/markdown")}, headers=headers)
+    assert doc_resp.status_code == 201
     
     # 3. Trigger Workflow via REST
     wf_resp = client.post(
         f"/projects/{project_id}/workflows/requirements",
-        json={"brd_id": brd_id},
+        json={},
         headers=headers
     )
     assert wf_resp.status_code == 202
@@ -214,9 +214,9 @@ def test_workflow_sse_events_stream(client):
     project_id = proj_resp["project_id"]
     
     content = "# Corporate Expense Management Platform\n- REQ-001: Expense"
-    brd = client.post(f"/api/brd/upload?project_id={project_id}", files={"file": ("sse.md", content, "text/markdown")}).json()
+    client.post(f"/projects/{project_id}/documents", files={"file": ("sse.md", content.encode("utf-8"), "text/markdown")}, headers=headers)
     
-    wf = client.post(f"/projects/{project_id}/workflows/requirements", json={"brd_id": brd["brd_id"]}, headers=headers).json()
+    wf = client.post(f"/projects/{project_id}/workflows/requirements", json={}, headers=headers).json()
     run_id = wf["run_id"]
     
     events_resp = client.get(f"/projects/{project_id}/runs/{run_id}/events", headers=headers)
@@ -225,3 +225,4 @@ def test_workflow_sse_events_stream(client):
     body = events_resp.text
     assert "workflow_started" in body
     assert "clarification_required" in body
+

@@ -8,12 +8,22 @@ from app.service import IngestionService
 from tests.test_persistence import FakeAnalysisExtractor, FakeExtractor, make_app
 
 
+from app.parser import parse_document
+
+
 def test_hitl_websocket_persists_answers_and_resolved_model(tmp_path):
     db_path = tmp_path / "hitl.sqlite3"
-    app = make_app(db_path)
+    repository = SQLiteRepository(str(db_path))
+    service = IngestionService(FakeExtractor())
+    analyzer = RequirementsAnalyzer(FakeAnalysisExtractor())
+    app = create_app(service=service, analyzer=analyzer, repository=repository)
     client = TestClient(app)
-    upload = client.post("/api/brd/upload", files={"file": ("hitl.md", b"# HITL", "text/markdown")})
-    brd_id = upload.json()["brd_id"]
+    
+    doc = parse_document("hitl.md", b"# HITL")
+    model = service.ingest(doc)
+    repository.save_requirements_model(model, doc.text, "text")
+    brd_id = model.brd_id
+
     analysis = client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()
     assert analysis["quality_status"] == "READY_FOR_CLARIFICATION"
     session_response = client.post("/api/hitl/session", json={"analysis_id": analysis["analysis_id"]})
@@ -42,9 +52,15 @@ def test_hitl_rejects_analysis_without_questions(tmp_path):
         def generate_json(self, prompt, schema):
             return {"issues": [], "clarification_questions": []}
     repository = SQLiteRepository(str(tmp_path / "clear.sqlite3"))
-    app = create_app(service=IngestionService(FakeExtractor()), analyzer=RequirementsAnalyzer(ClearAnalysis()), repository=repository)
+    service = IngestionService(FakeExtractor())
+    app = create_app(service=service, analyzer=RequirementsAnalyzer(ClearAnalysis()), repository=repository)
     client = TestClient(app)
-    brd_id = client.post("/api/brd/upload", files={"file": ("clear.md", b"# Clear", "text/markdown")}).json()["brd_id"]
+    doc = parse_document("clear.md", b"# Clear")
+    model = service.ingest(doc)
+    repository.save_requirements_model(model, doc.text, "text")
+    brd_id = model.brd_id
+
     analysis = client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()
     response = client.post("/api/hitl/session", json={"analysis_id": analysis["analysis_id"]})
     assert response.status_code == 409
+

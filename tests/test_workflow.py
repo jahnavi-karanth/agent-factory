@@ -9,13 +9,19 @@ from app.service import IngestionService
 from tests.test_persistence import FakeAnalysisExtractor, FakeExtractor
 
 
+from app.document_store import DocumentStore
+
+
 def make_workflow_app(path: Path):
     repository = SQLiteRepository(str(path))
+    doc_store = DocumentStore(str(path.parent / "chroma"))
     return create_app(
         service=IngestionService(FakeExtractor()),
         analyzer=RequirementsAnalyzer(FakeAnalysisExtractor()),
         repository=repository,
+        document_store=doc_store,
     )
+
 
 
 def test_project_run_langgraph_interrupt_resume_approval_and_artifacts(tmp_path, monkeypatch):
@@ -28,13 +34,16 @@ def test_project_run_langgraph_interrupt_resume_approval_and_artifacts(tmp_path,
     assert project.status_code == 201
     project_id = project.json()["project_id"]
 
-    upload = client.post("/api/brd/upload", files={"file": ("workflow.md", b"# Workflow", "text/markdown")})
-    assert upload.status_code == 200
-    brd_id = upload.json()["brd_id"]
+    doc_upload = client.post(f"/projects/{project_id}/documents", files={"file": ("workflow.md", b"# Workflow\n\n## 1. Executive Summary\nThe system shall process workflow requests.", "text/markdown")}, headers=headers)
+    print("DOC UPLOAD RESP:", doc_upload.status_code, doc_upload.json())
+    assert doc_upload.status_code == 201
 
-    started = client.post(f"/projects/{project_id}/workflows/requirements", json={"brd_id": brd_id}, headers=headers)
+
+
+    started = client.post(f"/projects/{project_id}/workflows/requirements", json={}, headers=headers)
     assert started.status_code == 202
     run_id = started.json()["run_id"]
+
     assert started.json()["status"] == "PAUSED"
     assert "clarification_request" in str(started.json()["interrupt"])
 

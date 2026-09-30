@@ -23,12 +23,21 @@ class FollowUpExtractor:
         return {"questions": []}
 
 
+from app.parser import parse_document
+
+
 def test_follow_up_round_is_generated_and_persisted(tmp_path):
     extractor = FollowUpExtractor()
     repository = SQLiteRepository(str(tmp_path / "followup.sqlite3"))
-    app = create_app(service=IngestionService(FakeExtractor()), analyzer=RequirementsAnalyzer(extractor), repository=repository)
+    service = IngestionService(FakeExtractor())
+    app = create_app(service=service, analyzer=RequirementsAnalyzer(extractor), repository=repository)
     client = TestClient(app)
-    brd_id = client.post("/api/brd/upload", files={"file": ("followup.md", b"# Followup", "text/markdown")}).json()["brd_id"]
+
+    doc = parse_document("followup.md", b"# Followup")
+    model = service.ingest(doc)
+    repository.save_requirements_model(model, doc.text, "text")
+    brd_id = model.brd_id
+
     analysis = client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()
     session_id = client.post("/api/hitl/session", json={"analysis_id": analysis["analysis_id"]}).json()["session_id"]
     with client.websocket_connect(f"/ws/hitl/{session_id}") as ws:
@@ -47,3 +56,4 @@ def test_follow_up_round_is_generated_and_persisted(tmp_path):
     assert state["follow_up_round"] == 1
     assert {item["question_id"] for item in state["answers"]} == {"Q-001", "Q-101"}
     assert client.get(f"/api/hitl/session/{session_id}").json()["status"] == "COMPLETED"
+

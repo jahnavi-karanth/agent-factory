@@ -119,48 +119,146 @@ class RequirementsWorkflow:
 
     def resolve_requirements(self, state: RequirementsWorkflowState) -> Dict[str, Any]:
         model = RequirementsModel.model_validate(state["requirements"])
-        question_map = {item.get("question_id"): item for item in state.get("analysis", {}).get("clarification_questions", [])}
+
+        # Build question map searching across state sources
+        all_questions = list(state.get("clarification_questions", []))
+        if "analysis" in state and isinstance(state["analysis"], dict):
+            all_questions.extend(state["analysis"].get("clarification_questions", []))
+
+        question_map = {}
+        for q in all_questions:
+            if isinstance(q, dict):
+                qid = q.get("question_id") or q.get("id")
+                if qid:
+                    question_map[qid] = q
+
         requirements = list(model.requirements)
         by_id = {item.id: index for index, item in enumerate(requirements)}
+
+        clarifications_list = []
         for answer in state.get("human_answers", []):
-            question = question_map.get(answer.get("question_id"), {})
-            for requirement_id in question.get("affected_requirements", []):
-                index = by_id.get(requirement_id)
-                if index is not None:
-                    original = requirements[index]
-                    clarification = f"{original.description} Clarification decision (human-provided): {str(answer.get('answer', '')).strip()}"
-                    requirements[index] = original.model_copy(update={"description": clarification})
+            if not isinstance(answer, dict):
+                continue
+            qid = answer.get("question_id") or answer.get("id")
+            ans_text = str(answer.get("answer", "")).strip()
+            q_obj = question_map.get(qid, {})
+            q_text = q_obj.get("question", f"Clarification ({qid})")
+
+            clarifications_list.append({
+                "question_id": qid,
+                "question": q_text,
+                "answer": ans_text
+            })
+
+            affected = q_obj.get("affected_requirements", [])
+            if affected:
+                for requirement_id in affected:
+                    index = by_id.get(requirement_id)
+                    if index is not None:
+                        original = requirements[index]
+                        clarification = f"{original.description} | Clarification decision ({qid}): {ans_text}"
+                        requirements[index] = original.model_copy(update={"description": clarification})
+            else:
+                if requirements:
+                    original = requirements[0]
+                    clarification = f"{original.description} | Clarification ({q_text}): {ans_text}"
+                    requirements[0] = original.model_copy(update={"description": clarification})
+
         feedback = str(state.get("rejection_feedback", "")).strip()
         if feedback and requirements:
             original = requirements[0]
-            requirements[0] = original.model_copy(update={"description": f"{original.description} Revision feedback to address (human-provided): {feedback}"})
-        metadata = dict(model.extraction_metadata)
-        metadata.update({"resolved": "true", "workflow_run_id": state["run_id"], "project_id": state["project_id"], "human_answers": state.get("human_answers", []), "ai_recommendations": state.get("ai_recommendations", []), "revision_count": state.get("revision_count", 0), "rejection_feedback": state.get("rejection_feedback", "")})
+            requirements[0] = original.model_copy(update={"description": f"{original.description} | Revision feedback: {feedback}"})
+
+        metadata = dict(model.extraction_metadata or {})
+        metadata.update({
+            "resolved": "true",
+            "workflow_run_id": state["run_id"],
+            "project_id": state["project_id"],
+            "human_answers": state.get("human_answers", []),
+            "human_clarifications": clarifications_list,
+            "ai_recommendations": state.get("ai_recommendations", []),
+            "revision_count": state.get("revision_count", 0),
+            "rejection_feedback": state.get("rejection_feedback", "")
+        })
+
         resolved = model.model_copy(update={"requirements": requirements, "extraction_metadata": metadata})
         return {"resolved_requirements": resolved.model_dump(mode="json"), "status": "RESOLVED"}
 
     def approval_gate(self, state: RequirementsWorkflowState) -> Dict[str, Any]:
-        response = interrupt({"type": "approval_request", "request_id": f"{state['run_id']}:approval:{state.get('revision_count', 0)}", "run_id": state["run_id"], "requirements": state["resolved_requirements"], "revision_count": state.get("revision_count", 0)})
+        all_questions = list(state.get("clarification_questions", []))
+        if "analysis" in state and isinstance(state["analysis"], dict):
+            all_questions.extend(state["analysis"].get("clarification_questions", []))
+
+        q_map = {}
+        for q in all_questions:
+            if isinstance(q, dict):
+                qid = q.get("question_id") or q.get("id")
+                if qid:
+                    q_map[qid] = q.get("question", "")
+
+        clarifications_summary = []
+        for ans in state.get("human_answers", []):
+            if isinstance(ans, dict):
+                qid = ans.get("question_id") or ans.get("id")
+                clarifications_summary.append({
+                    "question_id": qid,
+                    "question": q_map.get(qid, f"Clarification Question ({qid})"),
+                    "answer": ans.get("answer", "")
+                })
+
+        req_model = state.get("resolved_requirements", {})
+        req_list = req_model.get("requirements", []) if isinstance(req_model, dict) else []
+        requirements_summary = [
+            {
+                "id": req.get("id"),
+                "type": req.get("type"),
+                "description": req.get("description")
+            }
+            for req in req_list if isinstance(req, dict)
+        ]
+
+        response = interrupt({
+            "type": "approval_request",
+            "request_id": f"{state['run_id']}:approval:{state.get('revision_count', 0)}",
+            "run_id": state["run_id"],
+            "requirements": state["resolved_requirements"],
+            "clarification_summary": clarifications_summary,
+            "requirements_summary": requirements_summary,
+            "revision_count": state.get("revision_count", 0),
+        })
         decision = response if isinstance(response, dict) else {"decision": str(response)}
-        normalized = str(decision.get("decision", "")).upper()
+        normalized = str(decision.get("decision", "")).strip().upper()
         if normalized == "REJECT":
             return {"approval_status": "REJECTED", "rejection_feedback": str(decision.get("feedback", "")), "revision_count": state.get("revision_count", 0) + 1, "status": "REVISION_REQUESTED"}
-        return {"approval_status": "APPROVED", "status": "APPROVED"}
+        elif normalized == "APPROVE":
+            return {"approval_status": "APPROVED", "status": "APPROVED"}
+        return {"approval_status": "PAUSED", "status": "PAUSED"}
 
     def route_after_approval(self, state: RequirementsWorkflowState) -> str:
         if state.get("approval_status") == "REJECTED":
             if state.get("revision_count", 0) > 3:
                 return "finalize_artifacts"
             return "resolve_requirements"
-        return "finalize_artifacts"
+        elif state.get("approval_status") == "APPROVED":
+            return "finalize_artifacts"
+        return "approval_gate"
 
     def finalize_artifacts(self, state: RequirementsWorkflowState) -> Dict[str, Any]:
-        base = Path("data") / "projects" / state["project_id"] / "runs" / state["run_id"]
-        base.mkdir(parents=True, exist_ok=True)
+        run_dir = Path("data") / "projects" / state["project_id"] / "runs" / state["run_id"]
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        project_dir = Path("data") / "projects" / state["project_id"]
+        project_dir.mkdir(parents=True, exist_ok=True)
+
         model = RequirementsModel.model_validate(state["resolved_requirements"])
-        json_path = base / "Requirements.json"
-        md_path = base / "Requirements.md"
-        json_path.write_text(model.model_dump_json(indent=2), encoding="utf-8")
+
+        # Save resolved model version into SQLite DB for GET /projects/{project_id}/requirements
+        try:
+            self.repository.save_requirements_model(model, model.model_dump_json(), "markdown")
+        except Exception:
+            pass
+
+        # Build Markdown content
         lines = [f"# {model.title or 'Requirements'}", "", f"BRD ID: {model.brd_id}", "", "## Goals", ""]
         lines.extend(f"- {item}" for item in model.business_objectives or ([model.business_problem] if model.business_problem else ["Not specified"]))
         lines.extend(["", "## Personas", ""])
@@ -171,9 +269,36 @@ class RequirementsWorkflow:
         lines.extend(f"- {item}" for item in model.non_functional_requirements or [item.description for item in model.requirements if item.type == "non_functional"] or ["Not specified"])
         lines.extend(["", "## Constraints", ""])
         lines.extend(f"- {item}" for item in model.constraints or ["Not specified"])
+
+        # Add Human Clarifications Section
+        human_clarifications = model.extraction_metadata.get("human_clarifications", [])
+        lines.extend(["", "## Human Clarifications & Decisions", ""])
+        if human_clarifications:
+            for item in human_clarifications:
+                q_text = item.get("question", item.get("question_id", "Question"))
+                ans = item.get("answer", "")
+                lines.append(f"- **Q**: {q_text}\n  **A**: {ans}")
+        else:
+            lines.append("- No clarification questions were required.")
+
         lines.extend(["", "## Out-of-Scope", "", "- Not specified", "", "## Open Questions", ""])
         lines.extend(f"- {item}" for item in model.assumptions + model.success_criteria or ["Not specified"])
-        md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.repository.record_workflow_event(state["project_id"], state["run_id"], "workflow_completed", {"requirements_json": str(json_path), "requirements_md": str(md_path)})
-        self.repository.record_artifacts(state["project_id"], state["run_id"], str(md_path), str(json_path))
+
+        md_text = "\n".join(lines) + "\n"
+        json_text = model.model_dump_json(indent=2)
+
+        # Save in run directory
+        run_json_path = run_dir / "Requirements.json"
+        run_md_path = run_dir / "Requirements.md"
+        run_json_path.write_text(json_text, encoding="utf-8")
+        run_md_path.write_text(md_text, encoding="utf-8")
+
+        # Save in project root directory
+        proj_json_path = project_dir / "Requirements.json"
+        proj_md_path = project_dir / "Requirements.md"
+        proj_json_path.write_text(json_text, encoding="utf-8")
+        proj_md_path.write_text(md_text, encoding="utf-8")
+
+        self.repository.record_workflow_event(state["project_id"], state["run_id"], "workflow_completed", {"requirements_json": str(run_json_path), "requirements_md": str(run_md_path)})
+        self.repository.record_artifacts(state["project_id"], state["run_id"], str(run_md_path), str(run_json_path))
         return {"status": "COMPLETED"}

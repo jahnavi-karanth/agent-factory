@@ -90,14 +90,25 @@ def client(repo):
     return TestClient(app)
 
 
+from app.parser import parse_document
+
+
+def seed_brd(repo, extractor, content, filename="brd.md"):
+    doc = parse_document(filename, content.encode("utf-8") if isinstance(content, str) else content)
+    model = IngestionService(extractor).ingest(doc)
+    repo.save_requirements_model(model, doc.text, "text")
+    return model.brd_id
+
+
 # ==========================================
 # 6.1 HITL Session Creation Tests
 # ==========================================
 
-def test_hitl_session_creation_success(client):
+def test_hitl_session_creation_success(client, repo):
+    mock = MockHITLExtractor(generate_followups=False)
     content = "# Corporate Expense Management Platform\n## 1. Executive Summary\n- REQ-001: Expense submission\n## 2. Business Requirements\n- REQ-002: Approval"
-    brd = client.post("/api/brd/upload", files={"file": ("brd.md", content, "text/markdown")}).json()
-    analysis = client.post("/api/requirements/analyze", json={"brd_id": brd["brd_id"]}).json()
+    brd_id = seed_brd(repo, mock, content, "brd.md")
+    analysis = client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()
     
     session_resp = client.post("/api/hitl/session", json={"analysis_id": analysis["analysis_id"]})
     assert session_resp.status_code == 200
@@ -117,8 +128,8 @@ def test_hitl_session_creation_invalid_status_conflict(repo):
     ready_client = TestClient(ready_app)
     
     content = "# Corporate Expense Management Platform\n- REQ-001: Expense submission"
-    brd = ready_client.post("/api/brd/upload", files={"file": ("brd2.md", content, "text/markdown")}).json()
-    analysis = ready_client.post("/api/requirements/analyze", json={"brd_id": brd["brd_id"]}).json()
+    brd_id = seed_brd(repo, mock_ready, content, "brd2.md")
+    analysis = ready_client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()
     assert analysis["quality_status"] == "READY"
     
     session_resp = ready_client.post("/api/hitl/session", json={"analysis_id": analysis["analysis_id"]})
@@ -135,10 +146,11 @@ def test_hitl_session_creation_nonexistent_analysis_404(client):
 # 6.2 & 6.3 WebSocket Flow & Answer Validation
 # ==========================================
 
-def test_websocket_hitl_full_flow(client):
+def test_websocket_hitl_full_flow(client, repo):
+    mock = MockHITLExtractor(generate_followups=False)
     content = "# Corporate Expense Management Platform\n- REQ-001: Expense\n- REQ-002: Approval"
-    brd = client.post("/api/brd/upload", files={"file": ("ws.md", content, "text/markdown")}).json()
-    analysis = client.post("/api/requirements/analyze", json={"brd_id": brd["brd_id"]}).json()
+    brd_id = seed_brd(repo, mock, content, "ws.md")
+    analysis = client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()
     session = client.post("/api/hitl/session", json={"analysis_id": analysis["analysis_id"]}).json()
     session_id = session["session_id"]
     
@@ -179,10 +191,11 @@ def test_websocket_hitl_full_flow(client):
     assert get_session["answers"][0]["answer"] == "The manager approval threshold is specified as one thousand dollars per expense report."
 
 
-def test_websocket_hitl_reconnection_survival(client):
+def test_websocket_hitl_reconnection_survival(client, repo):
+    mock = MockHITLExtractor(generate_followups=False)
     content = "# Corporate Expense Management Platform\n- REQ-001: Expense\n- REQ-002: Approval"
-    brd = client.post("/api/brd/upload", files={"file": ("recon.md", content, "text/markdown")}).json()
-    analysis = client.post("/api/requirements/analyze", json={"brd_id": brd["brd_id"]}).json()
+    brd_id = seed_brd(repo, mock, content, "recon.md")
+    analysis = client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()
     session = client.post("/api/hitl/session", json={"analysis_id": analysis["analysis_id"]}).json()
     session_id = session["session_id"]
 
@@ -210,11 +223,12 @@ def test_websocket_hitl_reconnection_survival(client):
 # 6.4 & 6.5 Undecided Answers & Best Decisions
 # ==========================================
 
-def test_websocket_hitl_undecided_best_decisions(client, monkeypatch):
+def test_websocket_hitl_undecided_best_decisions(client, repo, monkeypatch):
     monkeypatch.setenv("MAX_FOLLOW_UP_ROUNDS", "0")
+    mock = MockHITLExtractor(generate_followups=False)
     content = "# Corporate Expense Management Platform\n- REQ-001: Expense\n- REQ-002: Approval"
-    brd = client.post("/api/brd/upload", files={"file": ("undecided.md", content, "text/markdown")}).json()
-    analysis = client.post("/api/requirements/analyze", json={"brd_id": brd["brd_id"]}).json()
+    brd_id = seed_brd(repo, mock, content, "undecided.md")
+    analysis = client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()
     session = client.post("/api/hitl/session", json={"analysis_id": analysis["analysis_id"]}).json()
     session_id = session["session_id"]
 
@@ -237,10 +251,10 @@ def test_websocket_hitl_undecided_best_decisions(client, monkeypatch):
 # 6.6 Resolved Requirements Model Verification
 # ==========================================
 
-def test_resolved_requirements_model_persisted(client):
+def test_resolved_requirements_model_persisted(client, repo):
+    mock = MockHITLExtractor(generate_followups=False)
     content = "# Corporate Expense Management Platform\n- REQ-001: Expense\n- REQ-002: Approval"
-    brd = client.post("/api/brd/upload", files={"file": ("res_model.md", content, "text/markdown")}).json()
-    brd_id = brd["brd_id"]
+    brd_id = seed_brd(repo, mock, content, "res_model.md")
     analysis = client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()
     session = client.post("/api/hitl/session", json={"analysis_id": analysis["analysis_id"]}).json()
     session_id = session["session_id"]
@@ -258,4 +272,6 @@ def test_resolved_requirements_model_persisted(client):
     
     # Check version history preserved
     versions = client.get(f"/api/brd/{brd_id}/versions").json()
+    assert len(versions) >= 2
+
     assert len(versions) >= 2

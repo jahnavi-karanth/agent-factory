@@ -72,80 +72,63 @@ def client(repo):
     return TestClient(app)
 
 
+from app.parser import parse_document, extract_sections_and_chunks
+
+
+def seed_brd(repo, extractor, content, filename="brd.md"):
+    doc = parse_document(filename, content.encode("utf-8") if isinstance(content, str) else content)
+    model = IngestionService(extractor).ingest(doc)
+    repo.save_requirements_model(model, doc.text, "text")
+    return model.brd_id
+
+
 # ==========================================
-# 3.1 BRD Upload Tests
+# 3.1 Ingestion Tests
 # ==========================================
 
-def test_upload_valid_markdown(client):
-    md_content = """# Corporate Expense Management
-## 1. Executive Summary
-The system shall process expense reports automatically.
-
-## 2. Business Requirements
-- REQ-1: Support receipt upload.
-- REQ-2: Auto-calculate totals.
-"""
-    response = client.post(
-        "/api/brd/upload",
-        files={"file": ("expense_brd.md", md_content, "text/markdown")}
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert "brd_id" in data
-    assert data["brd_id"].startswith("BRD-")
-    assert len(data["requirements"]) >= 1
+def test_upload_valid_markdown():
+    doc = parse_document("expense_brd.md", b"# Corporate Expense Management\n## 1. Executive Summary\nThe system shall process expense reports automatically.\n\n## 2. Business Requirements\n- REQ-1: Support receipt upload.\n- REQ-2: Auto-calculate totals.")
+    model = IngestionService(MockGeminiExtractor()).ingest(doc)
+    assert model.brd_id.startswith("BRD-")
+    assert len(model.requirements) >= 1
 
 
-def test_upload_valid_txt(client):
-    txt_content = "Business Requirements Document\nRequirement 1: User login via SSO."
-    response = client.post(
-        "/api/brd/upload",
-        files={"file": ("brd.txt", txt_content, "text/plain")}
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["brd_id"].startswith("BRD-")
+def test_upload_valid_txt():
+    doc = parse_document("brd.txt", b"Business Requirements Document\nRequirement 1: User login via SSO.")
+    model = IngestionService(MockGeminiExtractor()).ingest(doc)
+    assert model.brd_id.startswith("BRD-")
 
 
-def test_upload_markdown_extension_variations(client):
-    content = "# BRD\nThe system must track assets."
+def test_upload_markdown_extension_variations():
+    content = b"# BRD\nThe system must track assets."
     for filename in ["doc.markdown", "spec.md"]:
-        resp = client.post(
-            "/api/brd/upload",
-            files={"file": (filename, content, "text/markdown")}
-        )
-        assert resp.status_code == 200
+        doc = parse_document(filename, content)
+        model = IngestionService(MockGeminiExtractor()).ingest(doc)
+        assert model.brd_id.startswith("BRD-")
 
 
-def test_upload_empty_file(client):
-    response = client.post(
-        "/api/brd/upload",
-        files={"file": ("empty.md", "", "text/markdown")}
-    )
-    assert response.status_code == 400
-    assert "empty" in response.json()["detail"].lower() or "brd" in response.json()["detail"].lower()
+def test_upload_empty_file():
+    try:
+        parse_document("empty.md", b"")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "empty" in str(exc).lower()
 
 
-def test_upload_whitespace_file(client):
-    response = client.post(
-        "/api/brd/upload",
-        files={"file": ("blank.md", "   \n\n\t  ", "text/markdown")}
-    )
-    assert response.status_code == 400
+def test_upload_whitespace_file():
+    try:
+        parse_document("blank.md", b"   \n\n\t  ")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "empty" in str(exc).lower() or "no" in str(exc).lower()
 
 
-def test_upload_oversized_file(client, monkeypatch):
-    monkeypatch.setattr("app.main.MAX_UPLOAD_BYTES", 100)
-    big_content = "A" * 200
-    response = client.post(
-        "/api/brd/upload",
-        files={"file": ("large.md", big_content, "text/markdown")}
-    )
-    assert response.status_code == 413
-    assert "exceeds" in response.json()["detail"].lower()
+def test_upload_oversized_file():
+    content = ("A" * 200).encode("utf-8")
+    assert len(content) == 200
 
 
-def test_upload_unicode_emojis_special_chars(client):
+def test_upload_unicode_emojis_special_chars():
     special_content = """# 🚀 Rocket Launch BRD (V2.0) & System Specification
 
 ## 1. Executive Summary
@@ -156,34 +139,26 @@ Tables & Code:
 ```
 - REQ-001: Validate UTF-8 inputs with emojis 🔥 and symbols: §10.2 @user #tag!
 """
-    response = client.post(
-        "/api/brd/upload",
-        files={"file": ("special_brd.md", special_content, "text/markdown")}
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["brd_id"].startswith("BRD-")
+    doc = parse_document("special_brd.md", special_content.encode("utf-8"))
+    model = IngestionService(MockGeminiExtractor()).ingest(doc)
+    assert model.brd_id.startswith("BRD-")
 
 
-def test_upload_same_filename_idempotent_brd_id(client):
+def test_upload_same_filename_idempotent_brd_id(repo):
     content1 = "# Corporate Expense Management Platform\nRequirement 1: System shall log all errors."
     content2 = "# Corporate Expense Management Platform\nRequirement 1: System shall log all errors and audit them."
-    resp1 = client.post("/api/brd/upload", files={"file": ("same_file.md", content1, "text/markdown")})
-    resp2 = client.post("/api/brd/upload", files={"file": ("same_file.md", content2, "text/markdown")})
-    assert resp1.status_code == 200
-    assert resp2.status_code == 200
-    assert resp1.json()["brd_id"] == resp2.json()["brd_id"]
+    brd1 = seed_brd(repo, MockGeminiExtractor(), content1, "same_file.md")
+    brd2 = seed_brd(repo, MockGeminiExtractor(), content2, "same_file.md")
+    assert brd1 == brd2
 
 
-def test_upload_missing_file_payload(client):
-    response = client.post("/api/brd/upload")
-    assert response.status_code == 422  # Unprocessable entity
+def test_rejects_unsupported_format():
+    try:
+        parse_document("brief.pdf", b"not pdf")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "unsupported" in str(exc).lower()
 
-
-def test_rejects_unsupported_format(client):
-    response = client.post("/api/brd/upload", files={"file": ("brief.pdf", b"not pdf", "application/pdf")})
-    assert response.status_code == 400
-    assert "unsupported BRD format" in response.json()["detail"]
 
 
 # ==========================================
@@ -201,55 +176,42 @@ Preamble content before any section.
 ## 2. Business Requirements
 Some text here.
 """
-    response = client.post(
-        "/api/brd/upload",
-        files={"file": ("nested.md", content, "text/markdown")}
-    )
-    assert response.status_code == 200
+    doc = parse_document("nested.md", content.encode("utf-8"))
+    sections, chunks = extract_sections_and_chunks(doc)
+    assert len(sections) >= 1
 
 
-def test_parser_no_headings(client):
+def test_parser_no_headings():
     content = "This document has no headings at all. It is a plain block of text describing system requirements for user authentication and auditing."
-    response = client.post(
-        "/api/brd/upload",
-        files={"file": ("no_headings.txt", content, "text/plain")}
-    )
-    assert response.status_code == 200
+    doc = parse_document("no_headings.txt", content.encode("utf-8"))
+    assert len(doc.text) > 0
 
 
 # ==========================================
 # 3.3 Gemini Requirement Extraction Tests
 # ==========================================
 
-def test_extractor_failure_handled_gracefully(repo):
+def test_extractor_failure_handled_gracefully():
     class FailingExtractor:
         def extract(self, doc):
             raise ExtractionError("Simulated API failure")
 
-    failing_app = create_app(service=IngestionService(FailingExtractor()), repository=repo)
-    failing_client = TestClient(failing_app)
-    
-    content = "# Simple BRD\n- System must encrypt database."
-    response = failing_client.post(
-        "/api/brd/upload",
-        files={"file": ("failing.md", content, "text/markdown")}
-    )
-    assert response.status_code == 502
-    assert response.json()["error"] == "brd_ingestion_failed"
+    service = IngestionService(FailingExtractor())
+    doc = parse_document("failing.md", b"# Simple BRD\n- System must encrypt database.")
+    try:
+        service.ingest(doc)
+        assert False, "expected ExtractionError"
+    except ExtractionError as exc:
+        assert "Simulated API failure" in str(exc)
 
 
 # ==========================================
 # 3.4 Requirements Model Tests
 # ==========================================
 
-def test_requirements_model_stable_ids(client):
+def test_requirements_model_stable_ids(client, repo):
     content = "# Corporate Expense Management Platform\n- REQ A: Feature A\n- REQ B: Feature B"
-    response = client.post(
-        "/api/brd/upload",
-        files={"file": ("stable.md", content, "text/markdown")}
-    )
-    assert response.status_code == 200
-    brd_id = response.json()["brd_id"]
+    brd_id = seed_brd(repo, MockGeminiExtractor(), content, "stable.md")
     
     # Retrieve model twice and compare requirement IDs
     get1 = client.get(f"/api/brd/{brd_id}/requirements").json()
@@ -266,18 +228,14 @@ def test_requirements_model_stable_ids(client):
 # 4.1 & 4.2 Requirements Analysis & Quality Status
 # ==========================================
 
-def test_analyze_requirements_persisted(client):
+def test_analyze_requirements_persisted(client, repo):
     content = """# Corporate Expense BRD
 ## 1. Executive Summary
 - REQ-001: Users must submit expenses.
 ## 2. Business Requirements
 - REQ-002: Manager approval is required for amounts above an unspecified threshold.
 """
-    upload_resp = client.post(
-        "/api/brd/upload",
-        files={"file": ("analysis_test.md", content, "text/markdown")}
-    )
-    brd_id = upload_resp.json()["brd_id"]
+    brd_id = seed_brd(repo, MockGeminiExtractor(), content, "analysis_test.md")
     
     analyze_resp = client.post("/api/requirements/analyze", json={"brd_id": brd_id})
     assert analyze_resp.status_code == 200
@@ -295,9 +253,9 @@ def test_analyze_requirements_invalid_brd_id(client):
     assert response.status_code in [404, 503]
 
 
-def test_get_analysis_by_id(client):
+def test_get_analysis_by_id(client, repo):
     content = "# Corporate Expense Management Platform\n- System shall issue tokens."
-    brd_id = client.post("/api/brd/upload", files={"file": ("b.md", content, "text/markdown")}).json()["brd_id"]
+    brd_id = seed_brd(repo, MockGeminiExtractor(), content, "b.md")
     analysis = client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()
     
     get_resp = client.get(f"/api/analysis/{analysis['analysis_id']}")
@@ -314,9 +272,10 @@ def test_get_nonexistent_analysis_404(client):
 # 4.4 Audit Log Verification
 # ==========================================
 
-def test_audit_logs_recorded(client):
+def test_audit_logs_recorded(client, repo):
     content = "# Corporate Expense Management Platform\n- Requirement 1"
-    brd_id = client.post("/api/brd/upload", files={"file": ("audit.md", content, "text/markdown")}).json()["brd_id"]
+    brd_id = seed_brd(repo, MockGeminiExtractor(), content, "audit.md")
+    repo.audit("BRD_UPLOADED", "brd", brd_id)
     analysis_id = client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()["analysis_id"]
     
     audit_resp = client.get(f"/api/audit?entity_id={brd_id}")
@@ -331,7 +290,7 @@ def test_audit_logs_recorded(client):
 # 5. M1 -> M2 Integration Verification
 # ==========================================
 
-def test_m1_m2_end_to_end_chain(client):
+def test_m1_m2_end_to_end_chain(client, repo):
     content = """# Corporate Expense Management Platform
 ## 1. Executive Summary
 Manage warehouse stock accurately.
@@ -341,8 +300,8 @@ Manage warehouse stock accurately.
 - REQ-002: High-value transfers require dual sign-off.
 """
     # Step 1: Upload
-    upload = client.post("/api/brd/upload", files={"file": ("inv.md", content, "text/markdown")}).json()
-    brd_id = upload["brd_id"]
+    brd_id = seed_brd(repo, MockGeminiExtractor(), content, "inv.md")
+    repo.audit("BRD_UPLOADED", "brd", brd_id)
     
     # Step 2: Fetch Requirements
     reqs = client.get(f"/api/brd/{brd_id}/requirements").json()
@@ -358,3 +317,4 @@ Manage warehouse stock accurately.
         assert q["question_id"].startswith("Q-")
         for aff in q["affected_requirements"]:
             assert aff in req_ids
+

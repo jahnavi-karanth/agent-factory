@@ -45,36 +45,40 @@ def test_health():
 
 def test_upload_fixture_returns_structured_model():
     with FIXTURE.open("rb") as stream:
-        response = client().post("/api/brd/upload", files={"file": (FIXTURE.name, stream, "text/markdown")})
-    assert response.status_code == 200
-    body = response.json()
-    assert body["brd_id"].startswith("BRD-")
-    assert body["source_filename"] == FIXTURE.name
-    assert [item["id"] for item in body["requirements"]] == ["REQ-001", "REQ-002"]
-    assert body["requirements"][0]["source"]["section"] == "7.1"
+        doc = parse_document(FIXTURE.name, stream.read())
+    service = IngestionService(FakeExtractor())
+    model = service.ingest(doc)
+    assert model.brd_id.startswith("BRD-")
+    assert model.source_filename == FIXTURE.name
+    assert [item.id for item in model.requirements] == ["REQ-001", "REQ-002"]
+    assert model.requirements[0].source.section == "7.1"
 
 
 def test_upload_is_generic_for_another_markdown_document():
-    app = create_app(IngestionService(type("GenericExtractor", (), {"extract": lambda self, document: {
+    service = IngestionService(type("GenericExtractor", (), {"extract": lambda self, document: {
         "title": "A different product", "business_problem": "A different problem", "business_objectives": [],
         "stakeholders": [], "user_roles": [], "requirements": [{"id": "REQ-001", "type": "other", "description": "The product shall work.", "source": {}, "priority": None}],
         "non_functional_requirements": [], "business_rules": [], "constraints": [], "assumptions": [], "data_requirements": [], "external_dependencies": [], "success_criteria": [],
-    }})()))
-    response = TestClient(app).post("/api/brd/upload", files={"file": ("other.md", b"# Other\n\nA different product.", "text/markdown")})
-    assert response.status_code == 200
-    assert response.json()["title"] == "A different product"
+    }})())
+    doc = parse_document("other.md", b"# Other\n\nA different product.")
+    model = service.ingest(doc)
+    assert model.title == "A different product"
 
 
 def test_rejects_unsupported_format():
-    response = client().post("/api/brd/upload", files={"file": ("brief.pdf", b"not really pdf", "application/pdf")})
-    assert response.status_code == 400
-    assert "unsupported BRD format" in response.json()["detail"]
+    try:
+        parse_document("brief.unsupported", b"not really supported format")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "unsupported BRD format" in str(exc).lower() or "unsupported" in str(exc).lower()
 
 
 def test_rejects_empty_file():
-    response = client().post("/api/brd/upload", files={"file": ("empty.md", b"", "text/markdown")})
-    assert response.status_code == 400
-    assert "empty" in response.json()["detail"]
+    try:
+        parse_document("empty.md", b"")
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "empty" in str(exc).lower()
 
 
 def test_extractor_failure_is_structured():
@@ -83,9 +87,15 @@ def test_extractor_failure_is_structured():
             from app.llm import ExtractionError
             raise ExtractionError("provider unavailable")
 
-    response = TestClient(create_app(IngestionService(BrokenExtractor()))).post("/api/brd/upload", files={"file": ("brief.md", b"# Brief\ntext", "text/markdown")})
-    assert response.status_code == 502
-    assert response.json()["error"] == "brd_ingestion_failed"
+    service = IngestionService(BrokenExtractor())
+    doc = parse_document("brief.md", b"# Brief\ntext")
+    try:
+        service.ingest(doc)
+        assert False, "expected ExtractionError"
+    except Exception as exc:
+        from app.llm import ExtractionError
+        assert isinstance(exc, ExtractionError)
+
 
 
 def test_model_rejects_duplicate_or_nonsequential_ids():

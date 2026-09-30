@@ -446,6 +446,23 @@ class SQLiteRepository:
         except sqlite3.Error as exc:
             raise PersistenceError(f"audit persistence failed: {exc}") from exc
 
+    def list_audit(self, entity_type: Optional[str] = None, entity_id: Optional[str] = None) -> list[Dict[str, Any]]:
+        with self.connection() as db:
+            query = "SELECT id, timestamp, actor_type, actor_id, action, entity_type, entity_id, result, details_json FROM audit_logs"
+            conditions = []
+            params = []
+            if entity_type:
+                conditions.append("entity_type=?")
+                params.append(entity_type)
+            if entity_id:
+                conditions.append("entity_id=?")
+                params.append(entity_id)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY id DESC"
+            rows = db.execute(query, params).fetchall()
+            return [{"id": row["id"], "timestamp": row["timestamp"], "actor_type": row["actor_type"], "actor_id": row["actor_id"], "action": row["action"], "entity_type": row["entity_type"], "entity_id": row["entity_id"], "result": row["result"], "details": json.loads(row["details_json"])} for row in rows]
+
     def create_hitl_session(self, analysis_id: str) -> Dict[str, Any]:
         import uuid
         session_id = "HITL-" + uuid.uuid4().hex[:12].upper()
@@ -717,6 +734,12 @@ class SQLiteRepository:
             if not row:
                 raise PersistenceError(f"no workflow run found for run_id {run_id}")
             return dict(row)
+
+    def list_workflow_runs(self, project_id: str) -> list[Dict[str, Any]]:
+        self.get_project(project_id)
+        with self.connection() as db:
+            rows = db.execute("SELECT run_id,project_id,workflow_type,brd_id,status,error,created_at,updated_at FROM workflow_runs WHERE project_id=? ORDER BY created_at DESC", (project_id,)).fetchall()
+            return [dict(row) for row in rows]
 
     def update_workflow_run(self, project_id: str, run_id: str, status: str, error: Optional[str] = None) -> None:
         with self.connection() as db:

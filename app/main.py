@@ -12,8 +12,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import Body, Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from .llm import ExtractionError
@@ -86,7 +86,21 @@ def create_app(
     document_store: Optional[DocumentStore] = None,
     pattern_service: Optional[PatternService] = None,
 ) -> FastAPI:
-    app = FastAPI(title="AI Software Development Factory", version="0.1.0", description="Milestone 1: generic BRD ingestion")
+    tags_metadata = [
+        {"name": "Authentication", "description": "User registration and JWT token management"},
+        {"name": "Project Management", "description": "Project creation, listing, retrieval, and status updates"},
+        {"name": "Document Management", "description": "Document upload, structure parsing, outline sections, and semantic search"},
+        {"name": "Requirements Workflow (M1-M3)", "description": "Project-bound LangGraph requirements workflow, per-run WebSocket HITL, SSE progress events, and artifact generation"},
+        {"name": "Pattern Knowledge Base", "description": "Agentic design pattern repository management and embedding search"},
+        {"name": "System & Infrastructure", "description": "Health diagnostics and LangGraph diagram visualization"},
+        {"name": "Legacy Standalone APIs (Deprecated)", "description": "Un-scoped legacy endpoints retained for backward compatibility"},
+    ]
+    app = FastAPI(
+        title="AI Agent Factory v2",
+        version="0.2.0",
+        description="Document-Driven, Pattern-Aware Code Generator (Backend-Only)",
+        openapi_tags=tags_metadata,
+    )
     ingestion = service or IngestionService()
     requirements_analyzer = analyzer or RequirementsAnalyzer()
     artifacts = repository or SQLiteRepository()
@@ -99,7 +113,7 @@ def create_app(
     def interrupt_values(result: Dict[str, Any]) -> list[Any]:
         return [item.value if hasattr(item, "value") else item for item in result.get("__interrupt__", [])]
 
-    @app.post("/auth/register", status_code=201)
+    @app.post("/auth/register", status_code=201, tags=["Authentication"])
     async def register(request: AuthRequest) -> Dict[str, Any]:
         user_id = "USR-" + uuid.uuid4().hex[:12].upper()
         try:
@@ -108,7 +122,7 @@ def create_app(
         except PersistenceError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.post("/auth/token")
+    @app.post("/auth/token", tags=["Authentication"])
     async def login(request: AuthRequest) -> Dict[str, Any]:
         try:
             user = artifacts.get_user_by_email(request.email)
@@ -118,33 +132,35 @@ def create_app(
         except PersistenceError as exc:
             raise HTTPException(status_code=401, detail="invalid credentials") from exc
 
-    @app.post("/auth/login")
+    @app.post("/auth/login", tags=["Authentication"])
     async def auth_login(request: AuthRequest) -> Dict[str, Any]:
         return await login(request)
 
-    @app.post("/projects", status_code=201)
+    @app.post("/projects", status_code=201, tags=["Project Management"])
     async def create_project(request: ProjectRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
         status = request.status or "draft"
         if status not in VALID_PROJECT_STATUSES:
             raise HTTPException(status_code=422, detail=f"Invalid project status '{status}'. Must be one of: {sorted(VALID_PROJECT_STATUSES)}")
         project_id = "PROJ-" + uuid.uuid4().hex[:12].upper()
         try:
-            return artifacts.create_project(project_id, request.name, user_id, status=status)
+            proj = artifacts.create_project(project_id, request.name, user_id, status=status)
+            artifacts.audit("PROJECT_CREATED", "project", project_id, actor_id=user_id, details={"name": request.name, "status": status})
+            return proj
         except PersistenceError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    @app.get("/projects")
+    @app.get("/projects", tags=["Project Management"])
     async def list_projects(user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
         return artifacts.list_projects(user_id)
 
-    @app.get("/projects/{project_id}")
+    @app.get("/projects/{project_id}", tags=["Project Management"])
     async def get_project(project_id: str, user_id: str = Depends(current_user)) -> Dict[str, Any]:
         try:
             return artifacts.get_project(project_id, user_id)
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.patch("/projects/{project_id}")
+    @app.patch("/projects/{project_id}", tags=["Project Management"])
     async def update_project(project_id: str, request: ProjectUpdateRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
         if request.status is not None and request.status not in VALID_PROJECT_STATUSES:
             raise HTTPException(status_code=422, detail=f"Invalid project status '{request.status}'. Must be one of: {sorted(VALID_PROJECT_STATUSES)}")
@@ -153,7 +169,7 @@ def create_app(
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.get("/projects/{project_id}/documents/search")
+    @app.get("/projects/{project_id}/documents/search", tags=["Document Management"])
     async def search_project_documents(project_id: str, q: str, limit: int = 5, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
         try:
             artifacts.get_project(project_id, user_id)
@@ -161,7 +177,15 @@ def create_app(
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/projects/{project_id}/documents", status_code=201)
+    @app.get("/projects/{project_id}/documents", tags=["Document Management"])
+    async def list_project_documents(project_id: str, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return artifacts.list_documents(project_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/projects/{project_id}/documents", status_code=201, tags=["Document Management"])
     async def upload_project_document(project_id: str, file: UploadFile = File(...), user_id: str = Depends(current_user)) -> Dict[str, Any]:
         try:
             artifacts.get_project(project_id, user_id)
@@ -218,6 +242,7 @@ def create_app(
             )
             artifacts.save_document_sections_and_chunks(document_id, project_id, sections_data, chunks_data)
             documents.add_chunks(document_id, project_id, chunks_data)
+            artifacts.audit("DOCUMENT_UPLOADED", "project", project_id, actor_id=user_id, details={"document_id": document_id, "filename": filename})
             return doc_record
         except ValueError as exc:
             artifacts.save_document(project_id=project_id, document_id=document_id, filename=filename, file_type=suffix, storage_path="", status="FAILED", error_message=str(exc), content_hash=content_hash)
@@ -226,7 +251,7 @@ def create_app(
             artifacts.save_document(project_id=project_id, document_id=document_id, filename=filename, file_type=suffix, storage_path="", status="FAILED", error_message=str(exc), content_hash=content_hash)
             raise HTTPException(status_code=422, detail=f"Document processing failed: {exc}") from exc
 
-    @app.get("/projects/{project_id}/documents/{document_id}")
+    @app.get("/projects/{project_id}/documents/{document_id}", tags=["Document Management"])
     async def get_project_document_status(project_id: str, document_id: str, user_id: str = Depends(current_user)) -> Dict[str, Any]:
         try:
             artifacts.get_project(project_id, user_id)
@@ -234,7 +259,7 @@ def create_app(
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.get("/projects/{project_id}/documents/{document_id}/sections")
+    @app.get("/projects/{project_id}/documents/{document_id}/sections", tags=["Document Management"])
     async def get_project_document_sections(project_id: str, document_id: str, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
         try:
             artifacts.get_project(project_id, user_id)
@@ -242,7 +267,7 @@ def create_app(
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/projects/{project_id}/workflows/requirements", status_code=202)
+    @app.post("/projects/{project_id}/workflows/requirements", status_code=202, tags=["Requirements Workflow (M1-M3)"])
     async def start_requirements_workflow(project_id: str, request: RequirementsWorkflowRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
         try:
             artifacts.get_project(project_id, user_id)
@@ -286,6 +311,7 @@ def create_app(
             status = "PAUSED" if interrupted else result.get("status", "COMPLETED")
             artifacts.update_workflow_run(project_id, run["run_id"], status)
             artifacts.record_workflow_event(project_id, run["run_id"], "clarification_required" if interrupted else "workflow_completed", {"interrupted": interrupted})
+            artifacts.audit("REQUIREMENTS_WORKFLOW_STARTED", "project", project_id, actor_id=user_id, details={"run_id": run["run_id"], "brd_id": brd_id})
             return JSONResponse(status_code=202, headers={"Location": f"/projects/{project_id}/runs/{run['run_id']}"}, content={**run, "status": status, "interrupt": interrupt_values(result)})
         except HTTPException:
             raise
@@ -314,6 +340,7 @@ def create_app(
             status = "PAUSED" if interrupted else result.get("status", "COMPLETED")
             artifacts.update_workflow_run(project_id, run_id, status)
             artifacts.record_workflow_event(project_id, run_id, "approval_required" if interrupted and result.get("__interrupt__") and "approval_request" in str(result["__interrupt__"]) else "workflow_progress", {"interrupted": interrupted})
+            artifacts.audit("WORKFLOW_HITL_RESUMED", "project", project_id, actor_id=user_id, details={"run_id": run_id, "status": status, "payload": request.payload})
             return {"run_id": run_id, "status": status, "interrupt": interrupt_values(result), "state": {k: v for k, v in result.items() if k != "__interrupt__"}}
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -359,11 +386,76 @@ def create_app(
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.get("/health", response_model=HealthResponse)
+    @app.get("/projects/{project_id}/runs")
+    async def list_workflow_runs(project_id: str, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return artifacts.list_workflow_runs(project_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/projects/{project_id}/runs/{run_id}/cancel")
+    async def cancel_workflow_run(project_id: str, run_id: str, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            run = artifacts.get_workflow_run(project_id, run_id)
+            if run["status"] not in ("RUNNING", "PAUSED", "STARTING"):
+                raise HTTPException(status_code=400, detail=f"Cannot cancel run with status '{run['status']}'")
+            artifacts.update_workflow_run(project_id, run_id, "CANCELLED", "Run cancelled by user")
+            artifacts.record_workflow_event(project_id, run_id, "workflow_cancelled", {"reason": "user_cancellation"})
+            return {"run_id": run_id, "status": "CANCELLED", "message": "Workflow run cancelled successfully"}
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/projects/{project_id}/requirements", response_model=RequirementsModel)
+    async def get_project_requirements(project_id: str, user_id: str = Depends(current_user)) -> RequirementsModel:
+        try:
+            artifacts.get_project(project_id, user_id)
+            runs = artifacts.list_workflow_runs(project_id)
+            latest_brd_id = next((r["brd_id"] for r in runs if r.get("brd_id")), None)
+            if not latest_brd_id:
+                raise HTTPException(status_code=404, detail=f"No requirements model found for project '{project_id}'")
+            model, _ = artifacts.get_requirements_model(latest_brd_id)
+            return model
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/projects/{project_id}/versions")
+    async def get_project_versions(project_id: str, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            runs = artifacts.list_workflow_runs(project_id)
+            latest_brd_id = next((r["brd_id"] for r in runs if r.get("brd_id")), None)
+            if not latest_brd_id:
+                return []
+            return artifacts.list_brd_versions(latest_brd_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/projects/{project_id}/audit")
+    async def get_project_audit(project_id: str, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return artifacts.list_audit(entity_id=project_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/workflows/{name}/graph.png", tags=["System & Infrastructure"])
+    async def get_workflow_graph(name: str) -> Response:
+        if name != "requirements":
+            raise HTTPException(status_code=404, detail=f"Workflow '{name}' graph diagram not found")
+        try:
+            png_bytes = workflow.graph().get_graph().draw_mermaid_png()
+            return Response(content=png_bytes, media_type="image/png")
+        except Exception:
+            mermaid_str = workflow.graph().get_graph().draw_mermaid()
+            return Response(content=mermaid_str.encode("utf-8"), media_type="text/plain")
+
+    @app.get("/health", response_model=HealthResponse, tags=["System & Infrastructure"])
     async def health() -> HealthResponse:
         return HealthResponse(status="ok", milestone="BRD ingestion")
 
-    @app.get("/healthz")
+    @app.get("/healthz", tags=["System & Infrastructure"])
     async def healthz() -> Dict[str, Any]:
         checks: Dict[str, str] = {}
         try:
@@ -385,35 +477,8 @@ def create_app(
         healthy = all(value == "ok" for value in checks.values())
         return JSONResponse(status_code=200 if healthy else 503, content={"status": "ok" if healthy else "degraded", "checks": checks})
 
-    @app.post("/api/brd/upload", response_model=RequirementsModel, responses={400: {"model": ErrorResponse}, 413: {"model": ErrorResponse}, 422: {"model": ErrorResponse}, 502: {"model": ErrorResponse}})
-    async def upload_brd(file: UploadFile = File(...), project_id: Optional[str] = None) -> RequirementsModel:
-        filename = file.filename or "uploaded_brd"
-        logger.info("upload received filename=%s", filename)
-        content = await file.read(MAX_UPLOAD_BYTES + 1)
-        if len(content) > MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail=f"BRD exceeds maximum upload size of {MAX_UPLOAD_BYTES} bytes")
-        try:
-            logger.info("document parsing started filename=%s", filename)
-            document = parse_document(filename, content)
-            logger.info("document parsing completed filename=%s", filename)
-            model = ingestion.ingest(document)
-            if project_id:
-                artifacts.get_project(project_id)
-            artifacts.save_requirements_model(model, document.text, os.path.splitext(filename)[1].lower() or "text")
-            if project_id:
-                documents.add(model.brd_id, project_id, filename, document.text, {"source_filename": filename})
-            artifacts.audit("BRD_UPLOADED", "brd", model.brd_id, details={"filename": filename})
-            artifacts.audit("REQUIREMENTS_MODEL_CREATED", "requirements_model", model.brd_id, details={"requirement_count": len(model.requirements)})
-            return model
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except ExtractionError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        except Exception as exc:
-            logger.exception("workflow failed filename=%s", filename)
-            raise HTTPException(status_code=422, detail=f"BRD could not be converted into a valid Requirements Model: {exc}") from exc
 
-    @app.post("/api/requirements/analyze", response_model=RequirementsAnalysis, responses={400: {"model": ErrorResponse}, 502: {"model": ErrorResponse}, 422: {"model": ErrorResponse}})
+    @app.post("/api/requirements/analyze", response_model=RequirementsAnalysis, responses={400: {"model": ErrorResponse}, 502: {"model": ErrorResponse}, 422: {"model": ErrorResponse}}, tags=["Legacy Standalone APIs (Deprecated)"])
     async def analyze_requirements(request: AnalysisRequest) -> RequirementsAnalysis:
         try:
             extra = request.model_extra
@@ -438,7 +503,7 @@ def create_app(
             logger.exception("requirements analysis failed brd_id=%s", requirements.brd_id)
             raise HTTPException(status_code=422, detail=f"Requirements Model could not be analyzed: {exc}") from exc
 
-    @app.get("/api/brd/{brd_id}/requirements", response_model=RequirementsModel, responses={404: {"model": ErrorResponse}, 503: {"model": ErrorResponse}})
+    @app.get("/api/brd/{brd_id}/requirements", response_model=RequirementsModel, responses={404: {"model": ErrorResponse}, 503: {"model": ErrorResponse}}, tags=["Legacy Standalone APIs (Deprecated)"])
     async def get_requirements(brd_id: str) -> RequirementsModel:
         try:
             model, _ = artifacts.get_requirements_model(brd_id)
@@ -447,18 +512,18 @@ def create_app(
             status = 404 if "no persisted" in str(exc) else 503
             raise HTTPException(status_code=status, detail=str(exc)) from exc
 
-    @app.get("/api/brd/{brd_id}/versions")
+    @app.get("/api/brd/{brd_id}/versions", tags=["Legacy Standalone APIs (Deprecated)"])
     async def get_brd_versions(brd_id: str) -> list[Dict[str, Any]]:
         try:
             return artifacts.list_brd_versions(brd_id)
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.get("/api/audit")
+    @app.get("/api/audit", tags=["Legacy Standalone APIs (Deprecated)"])
     async def get_audit(entity_type: Optional[str] = None, entity_id: Optional[str] = None) -> list[Dict[str, Any]]:
         return artifacts.list_audit(entity_type, entity_id)
 
-    @app.get("/api/analysis/{analysis_id}", response_model=RequirementsAnalysis, responses={404: {"model": ErrorResponse}, 503: {"model": ErrorResponse}})
+    @app.get("/api/analysis/{analysis_id}", response_model=RequirementsAnalysis, responses={404: {"model": ErrorResponse}, 503: {"model": ErrorResponse}}, tags=["Legacy Standalone APIs (Deprecated)"])
     async def get_analysis(analysis_id: str) -> RequirementsAnalysis:
         try:
             return artifacts.get_analysis(analysis_id)
@@ -466,7 +531,7 @@ def create_app(
             status = 404 if "no persisted" in str(exc) else 503
             raise HTTPException(status_code=status, detail=str(exc)) from exc
 
-    @app.post("/api/hitl/session")
+    @app.post("/api/hitl/session", tags=["Legacy Standalone APIs (Deprecated)"])
     async def create_hitl_session(request: HITLSessionRequest) -> Dict[str, Any]:
         try:
             analysis = artifacts.get_analysis(request.analysis_id)
@@ -476,7 +541,7 @@ def create_app(
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.get("/api/hitl/session/{session_id}")
+    @app.get("/api/hitl/session/{session_id}", tags=["Legacy Standalone APIs (Deprecated)"])
     async def get_hitl_session(session_id: str) -> Dict[str, Any]:
         try:
             return artifacts.get_hitl_session(session_id)
@@ -571,6 +636,7 @@ def create_app(
                 interrupted = bool(result.get("__interrupt__"))
                 status = "PAUSED" if interrupted else result.get("status", "COMPLETED")
                 artifacts.update_workflow_run(project_id, run_id, status)
+                artifacts.audit("WORKFLOW_HITL_WEBSOCKET_MESSAGE", "project", project_id, actor_id=user_id, details={"run_id": run_id, "type": message_type, "payload": payload})
                 if interrupted:
                     await websocket.send_json(interrupt_values(result)[0])
                 else:
@@ -586,7 +652,7 @@ def create_app(
 
     # Pattern Knowledge Base Endpoints
 
-    @app.post("/patterns", status_code=201, response_model=PatternModel)
+    @app.post("/patterns", status_code=201, response_model=PatternModel, tags=["Pattern Knowledge Base"])
     async def create_pattern(request: PatternCreateRequest, user_id: str = Depends(current_user)) -> PatternModel:
         try:
             return patterns_svc.create_pattern(request)
@@ -595,9 +661,15 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    @app.post("/patterns/bulk", status_code=201, response_model=List[PatternModel])
-    async def bulk_create_patterns(request: Request, user_id: str = Depends(current_user)) -> List[PatternModel]:
+    @app.post("/patterns/bulk", status_code=201, response_model=List[PatternModel], tags=["Pattern Knowledge Base"])
+    async def bulk_create_patterns(
+        request: Request,
+        body: Optional[List[PatternCreateRequest]] = Body(None, description="List of pattern objects for bulk creation"),
+        user_id: str = Depends(current_user)
+    ) -> List[PatternModel]:
         try:
+            if body is not None:
+                return patterns_svc.bulk_create_patterns(body)
             content_type = (request.headers.get("content-type") or "").lower()
             if "multipart/form-data" in content_type:
                 form = await request.form()
@@ -618,25 +690,25 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    @app.post("/patterns/search", response_model=List[PatternSearchResult])
+    @app.post("/patterns/search", response_model=List[PatternSearchResult], tags=["Pattern Knowledge Base"])
     async def search_patterns(request: PatternSearchRequest, user_id: str = Depends(current_user)) -> List[PatternSearchResult]:
         try:
             return patterns_svc.search_patterns(request)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    @app.get("/patterns", response_model=List[PatternModel])
+    @app.get("/patterns", response_model=List[PatternModel], tags=["Pattern Knowledge Base"])
     async def list_patterns(tag: Optional[str] = None, user_id: str = Depends(current_user)) -> List[PatternModel]:
         return patterns_svc.list_patterns(tag=tag)
 
-    @app.get("/patterns/{pattern_id}", response_model=PatternModel)
+    @app.get("/patterns/{pattern_id}", response_model=PatternModel, tags=["Pattern Knowledge Base"])
     async def get_pattern(pattern_id: str, user_id: str = Depends(current_user)) -> PatternModel:
         try:
             return patterns_svc.get_pattern(pattern_id)
         except PersistenceError as exc:
             raise HTTPException(status_code=404, detail=f"Pattern '{pattern_id}' not found") from exc
 
-    @app.patch("/patterns/{pattern_id}", response_model=PatternModel)
+    @app.patch("/patterns/{pattern_id}", response_model=PatternModel, tags=["Pattern Knowledge Base"])
     async def update_pattern(pattern_id: str, request: PatternUpdateRequest, user_id: str = Depends(current_user)) -> PatternModel:
         try:
             return patterns_svc.update_pattern(pattern_id, request)
@@ -645,7 +717,7 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    @app.delete("/patterns/{pattern_id}", response_model=PatternModel)
+    @app.delete("/patterns/{pattern_id}", response_model=PatternModel, tags=["Pattern Knowledge Base"])
     async def delete_pattern(pattern_id: str, user_id: str = Depends(current_user)) -> PatternModel:
         try:
             return patterns_svc.delete_pattern(pattern_id)
