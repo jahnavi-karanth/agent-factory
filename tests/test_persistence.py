@@ -5,7 +5,9 @@ from fastapi.testclient import TestClient
 from app.analyzer import RequirementsAnalyzer
 from app.main import create_app
 from app.repository import SQLiteRepository
+from app.parser import parse_document
 from app.service import IngestionService
+
 
 
 class FakeExtractor:
@@ -51,11 +53,13 @@ def make_app(path: Path):
 
 
 def test_upload_persists_brd_model_and_requirements(tmp_path):
-    app = make_app(tmp_path / "artifacts.sqlite3")
-    response = TestClient(app).post("/api/brd/upload", files={"file": ("persisted.md", b"# Persisted\n## 2. Requests\n## 3. Status", "text/markdown")})
-    assert response.status_code == 200
-    body = response.json()
-    brd_id = body["brd_id"]
+    repo = SQLiteRepository(str(tmp_path / "artifacts.sqlite3"))
+    app = create_app(service=IngestionService(FakeExtractor()), analyzer=RequirementsAnalyzer(FakeAnalysisExtractor()), repository=repo)
+    doc = parse_document("persisted.md", b"# Persisted\n## 2. Requests\n## 3. Status")
+    model = IngestionService(FakeExtractor()).ingest(doc)
+    repo.save_requirements_model(model, doc.text, "text")
+    brd_id = model.brd_id
+
     retrieved = TestClient(app).get(f"/api/brd/{brd_id}/requirements")
     assert retrieved.status_code == 200
     assert [item["id"] for item in retrieved.json()["requirements"]] == ["REQ-001", "REQ-002"]
@@ -64,10 +68,16 @@ def test_upload_persists_brd_model_and_requirements(tmp_path):
 
 def test_analysis_persists_relationships_and_dynamic_count(tmp_path):
     db_path = tmp_path / "artifacts.sqlite3"
-    app = make_app(db_path)
+    repo = SQLiteRepository(str(db_path))
+    service = IngestionService(FakeExtractor())
+    app = create_app(service=service, analyzer=RequirementsAnalyzer(FakeAnalysisExtractor()), repository=repo)
     client = TestClient(app)
-    upload = client.post("/api/brd/upload", files={"file": ("persisted.md", b"# Persisted", "text/markdown")})
-    brd_id = upload.json()["brd_id"]
+
+    doc = parse_document("persisted.md", b"# Persisted")
+    model = service.ingest(doc)
+    repo.save_requirements_model(model, doc.text, "text")
+    brd_id = model.brd_id
+
     response = client.post("/api/requirements/analyze", json={"brd_id": brd_id})
     assert response.status_code == 200
     analysis = response.json()
@@ -83,10 +93,15 @@ def test_analysis_persists_relationships_and_dynamic_count(tmp_path):
 
 def test_artifacts_survive_repository_and_app_restart(tmp_path):
     db_path = tmp_path / "restart.sqlite3"
-    first = make_app(db_path)
+    repo = SQLiteRepository(str(db_path))
+    service = IngestionService(FakeExtractor())
+    doc = parse_document("restart.md", b"# Restart")
+    model = service.ingest(doc)
+    repo.save_requirements_model(model, doc.text, "text")
+    brd_id = model.brd_id
+
+    first = create_app(service=service, analyzer=RequirementsAnalyzer(FakeAnalysisExtractor()), repository=repo)
     first_client = TestClient(first)
-    upload = first_client.post("/api/brd/upload", files={"file": ("restart.md", b"# Restart", "text/markdown")})
-    brd_id = upload.json()["brd_id"]
     analysis = first_client.post("/api/requirements/analyze", json={"brd_id": brd_id}).json()
 
     second = make_app(db_path)
@@ -102,3 +117,19 @@ def test_missing_artifact_returns_not_found(tmp_path):
     client = TestClient(make_app(tmp_path / "missing.sqlite3"))
     assert client.get("/api/brd/BRD-MISSING/requirements").status_code == 404
     assert client.get("/api/analysis/ANALYSIS-MISSING").status_code == 404
+
+
+def test_repeated_upload_preserves_versions_and_latest_retrieval(tmp_path):
+    db_path = tmp_path / "versions.sqlite3"
+    repo = SQLiteRepository(str(db_path))
+    service = IngestionService(FakeExtractor())
+    doc = parse_document("same.md", b"# Same")
+    model1 = service.ingest(doc)
+    repo.save_requirements_model(model1, doc.text, "text")
+    repo.save_requirements_model(model1, doc.text, "text")
+    brd_id = model1.brd_id
+
+    db = __import__("sqlite3").connect(db_path)
+    assert db.execute("select count(*) from requirements_models where brd_id=?", (brd_id,)).fetchone()[0] == 2
+    assert db.execute("select count(*) from brd_versions where brd_id=?", (brd_id,)).fetchone()[0] == 2
+

@@ -173,3 +173,48 @@ def test_analysis_provider_failure_is_propagated():
         raise AssertionError("expected provider failure")
     except ExtractionError as exc:
         assert "provider unavailable" in str(exc)
+
+
+def test_normalizes_noncanonical_security_issue_prefix_and_question_reference():
+    payload = analysis_payload()
+    payload["issues"][0]["issue_id"] = "SEC-001"
+    payload["clarification_questions"][0]["issue_id"] = "SEC-001"
+
+    class SecurityExtractor:
+        def generate_json(self, prompt, schema):
+            return payload
+
+    result = RequirementsAnalyzer(SecurityExtractor()).analyze(requirements_model())
+    assert result.issues[0].issue_id == "AMB-001"
+    assert result.clarification_questions[0].issue_id == "AMB-001"
+
+
+def test_follow_up_fallback_does_not_recursively_wrap_question():
+    model = requirements_model()
+    analysis = RequirementsAnalyzer(FakeAnalysisExtractor()).analyze(model)
+    answers = [{
+        "question_id": "Q-001",
+        "issue_id": "AMB-001",
+        "question": "Please provide a specific, direct answer to the original question: Which events trigger notifications? If this is undecided, say whether you want the AI to recommend the best option.",
+        "answer": "undecided",
+    }]
+    result = RequirementsAnalyzer(FakeAnalysisExtractor()).generate_follow_up_questions(model, analysis, answers, 1)
+    assert len(result) == 1
+    assert result[0]["question"] == "Please answer this question specifically: Which events should trigger notifications, who should receive them, and through which channels? If the decision is undecided, say whether you want the AI to recommend the best option."
+    assert "Please provide a specific, direct answer to the original question: Please provide" not in result[0]["question"]
+
+
+def test_substantive_unrelated_document_is_marked_invalid():
+    from app.parser import parse_document
+    from app.service import IngestionService
+
+    document = parse_document("random.md", b"""# Random README\n\nThis project explains installation commands, local development, and deployment notes.\n\nRun the CLI and configure the development environment as described below.\n""")
+    assert IngestionService._looks_like_brd(document) is False
+
+
+def test_small_synthetic_document_remains_usable_for_fixture_workflows():
+    from app.parser import parse_document
+    from app.service import IngestionService
+
+    document = parse_document("fixture.md", b"# HITL")
+    assert IngestionService._looks_like_brd(document) is True

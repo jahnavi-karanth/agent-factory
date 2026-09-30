@@ -1,0 +1,473 @@
+{
+  "brd_id": "BRD-B066A0FB9899",
+  "title": "Corporate Expense Management Platform",
+  "source_filename": "Business Requirements Document — Corporate Expense Management Platform.md",
+  "business_problem": "The company currently relies on a combination of spreadsheets, email, and manual document processing to manage employee business expenses. Employees are required to record expenses, retain receipts, submit them for approval, and follow up with managers and the finance team when reimbursements are delayed. As the organization grows, the existing process has become increasingly difficult to manage. Finance teams spend significant time reviewing expense submissions and correcting incomplete or inconsistent information. Managers have limited visibility into pending expenses, while employees have limited visibility into the progress of their reimbursement requests.",
+  "business_objectives": [
+    "Replace the current spreadsheet- and email-based expense submission process.",
+    "Reduce the amount of manual data entry required from employees.",
+    "Improve the quality and completeness of expense submissions.",
+    "Provide managers with a consistent process for reviewing expenses.",
+    "Improve visibility into pending and completed expenses.",
+    "Help the finance team identify expenses that require additional review.",
+    "Provide management with useful information about company spending.",
+    "Maintain an appropriate record of expense-related activity."
+  ],
+  "stakeholders": [
+    "Employees",
+    "Managers",
+    "Finance Team",
+    "Finance Leadership",
+    "System Administrators"
+  ],
+  "user_roles": [
+    "Employees",
+    "Managers",
+    "Finance Team",
+    "System Administrators"
+  ],
+  "requirements": [
+    {
+      "id": "REQ-001",
+      "type": "functional",
+      "description": "The platform shall allow authorized employees, managers, finance users, and administrators to access functionality appropriate to their responsibilities.",
+      "source": {
+        "section": "7.1",
+        "title": "7.1 User Access",
+        "line_start": 127,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-002",
+      "type": "functional",
+      "description": "Users should not be able to access expense information that they are not authorized to view.",
+      "source": {
+        "section": "7.1",
+        "title": "7.1 User Access",
+        "line_start": 127,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-003",
+      "type": "functional",
+      "description": "Employees shall be able to create an expense submission.",
+      "source": {
+        "section": "7.2",
+        "title": "7.2 Expense Creation",
+        "line_start": 135,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-004",
+      "type": "functional",
+      "description": "An expense should contain information such as expense date, amount, currency, merchant or vendor, expense category, business purpose, description, and supporting documentation where applicable. | Clarification decision (Q-001): OAuth2 JWT",
+      "source": {
+        "section": "7.2",
+        "title": "7.2 Expense Creation",
+        "line_start": 135,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-005",
+      "type": "functional",
+      "description": "The system should identify information that is required before an expense can be submitted. | Clarification decision (Q-001): OAuth2 JWT",
+      "source": {
+        "section": "7.2",
+        "title": "7.2 Expense Creation",
+        "line_start": 135,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-006",
+      "type": "functional",
+      "description": "Employees should be able to provide receipts or other supporting documents associated with an expense.",
+      "source": {
+        "section": "7.3",
+        "title": "7.3 Receipt Handling",
+        "line_start": 154,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-007",
+      "type": "functional",
+      "description": "The platform should make it possible to extract relevant information from submitted receipts where the information can be reliably identified.",
+      "source": {
+        "section": "7.3",
+        "title": "7.3 Receipt Handling",
+        "line_start": 154,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-008",
+      "type": "functional",
+      "description": "Employees must be able to review and correct information extracted from a receipt before submitting the expense.",
+      "source": {
+        "section": "7.3",
+        "title": "7.3 Receipt Handling",
+        "line_start": 154,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-009",
+      "type": "functional",
+      "description": "The platform should assist employees in assigning an appropriate category to an expense.",
+      "source": {
+        "section": "7.4",
+        "title": "7.4 Expense Categorization",
+        "line_start": 164,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-010",
+      "type": "functional",
+      "description": "The employee should be able to change the suggested category when necessary.",
+      "source": {
+        "section": "7.4",
+        "title": "7.4 Expense Categorization",
+        "line_start": 164,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-011",
+      "type": "functional",
+      "description": "The system should maintain consistent categories so that expenses can subsequently be reported and analyzed.",
+      "source": {
+        "section": "7.4",
+        "title": "7.4 Expense Categorization",
+        "line_start": 164,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-012",
+      "type": "functional",
+      "description": "An employee should be able to submit a completed expense for review.",
+      "source": {
+        "section": "7.5",
+        "title": "7.5 Expense Submission",
+        "line_start": 174,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-013",
+      "type": "functional",
+      "description": "The system should prevent incomplete submissions where required information is missing. | Clarification decision (Q-001): OAuth2 JWT",
+      "source": {
+        "section": "7.5",
+        "title": "7.5 Expense Submission",
+        "line_start": 174,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-014",
+      "type": "functional",
+      "description": "Once submitted, the expense should have a status that allows the employee and relevant reviewers to understand its current stage.",
+      "source": {
+        "section": "7.5",
+        "title": "7.5 Expense Submission",
+        "line_start": 174,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-015",
+      "type": "functional",
+      "description": "Managers should be able to view expenses requiring their attention.",
+      "source": {
+        "section": "7.6",
+        "title": "7.6 Manager Review",
+        "line_start": 184,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-016",
+      "type": "functional",
+      "description": "A manager should be able to review expense information, review supporting documentation, approve an expense, reject or return an expense, and provide comments when additional information is required.",
+      "source": {
+        "section": "7.6",
+        "title": "7.6 Manager Review",
+        "line_start": 184,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-017",
+      "type": "functional",
+      "description": "The employee should be informed when action has been taken on an expense.",
+      "source": {
+        "section": "7.6",
+        "title": "7.6 Manager Review",
+        "line_start": 184,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-018",
+      "type": "functional",
+      "description": "The finance team should be able to access expenses that require finance review.",
+      "source": {
+        "section": "7.7",
+        "title": "7.7 Finance Review",
+        "line_start": 200,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-019",
+      "type": "functional",
+      "description": "Finance users should be able to examine expense details and supporting documentation and take appropriate action according to company policy.",
+      "source": {
+        "section": "7.7",
+        "title": "7.7 Finance Review",
+        "line_start": 200,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-020",
+      "type": "functional",
+      "description": "The system should make it possible to distinguish between expenses that have completed approval and those that still require action.",
+      "source": {
+        "section": "7.7",
+        "title": "7.7 Finance Review",
+        "line_start": 200,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-021",
+      "type": "functional",
+      "description": "The platform should provide employees and authorized reviewers with the current status of an expense.",
+      "source": {
+        "section": "7.8",
+        "title": "7.8 Expense Status",
+        "line_start": 210,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-022",
+      "type": "functional",
+      "description": "The status should make it clear whether an expense is being prepared, submitted, awaiting review, returned for additional information, approved, rejected, or completed.",
+      "source": {
+        "section": "7.8",
+        "title": "7.8 Expense Status",
+        "line_start": 210,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-023",
+      "type": "functional",
+      "description": "The exact lifecycle should be consistent across the application.",
+      "source": {
+        "section": "7.8",
+        "title": "7.8 Expense Status",
+        "line_start": 210,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-024",
+      "type": "functional",
+      "description": "Relevant users should receive notifications when an action is required or when an important change occurs to an expense.",
+      "source": {
+        "section": "7.9",
+        "title": "7.9 Notifications",
+        "line_start": 228,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-025",
+      "type": "functional",
+      "description": "Authorized users should be able to locate expenses using relevant information.",
+      "source": {
+        "section": "7.10",
+        "title": "7.10 Expense Search",
+        "line_start": 238,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-026",
+      "type": "functional",
+      "description": "The finance team should be able to search and filter expenses based on information such as employee, department, expense category, date, status, and amount.",
+      "source": {
+        "section": "7.10",
+        "title": "7.10 Expense Search",
+        "line_start": 238,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-027",
+      "type": "functional",
+      "description": "The platform should provide finance users with information that helps them understand company expense activity.",
+      "source": {
+        "section": "7.11",
+        "title": "7.11 Reporting",
+        "line_start": 253,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-028",
+      "type": "functional",
+      "description": "Reports should support analysis by dimensions such as time period, department, employee, expense category, and approval status.",
+      "source": {
+        "section": "7.11",
+        "title": "7.11 Reporting",
+        "line_start": 253,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-029",
+      "type": "functional",
+      "description": "The platform should assist the finance team in identifying expenses that appear inconsistent with expected company spending behavior or expense policies. | Clarification decision (Q-002): OAuth2 JWT",
+      "source": {
+        "section": "7.12",
+        "title": "7.12 Exception Identification",
+        "line_start": 269,
+        "line_end": null
+      },
+      "priority": "High"
+    },
+    {
+      "id": "REQ-030",
+      "type": "functional",
+      "description": "The system should maintain a history of significant actions performed on an expense.",
+      "source": {
+        "section": "7.13",
+        "title": "7.13 Audit History",
+        "line_start": 279,
+        "line_end": null
+      },
+      "priority": "High"
+    }
+  ],
+  "non_functional_requirements": [
+    "Expense information and supporting documents should only be accessible to authorized users.",
+    "The system should protect sensitive employee and financial information.",
+    "Submitted expenses should not be lost if an individual processing step fails.",
+    "The system should provide appropriate handling for failures during receipt processing or other automated operations.",
+    "Normal user operations such as viewing an expense, submitting an expense, or retrieving an expense list should provide a responsive user experience.",
+    "The platform should be capable of supporting the organization's expected growth in employees and expense submissions without requiring a fundamental redesign.",
+    "Important expense lifecycle events and user actions should be traceable."
+  ],
+  "business_rules": [
+    "Expense submissions should comply with applicable company expense policies.",
+    "Expenses that do not contain required information should not proceed through the normal approval process.",
+    "An employee should not be able to approve their own expense.",
+    "Managers should only be responsible for expenses belonging to employees within their applicable reporting structure.",
+    "Finance users should have broader visibility than individual employees or managers.",
+    "Expenses that require additional information should be returned to the appropriate employee rather than silently progressing through the approval process."
+  ],
+  "constraints": [],
+  "assumptions": [
+    "The platform will initially be used internally by the organization.",
+    "Employees and managers will have authenticated access to the system.",
+    "Company expense policies will continue to be maintained by the finance organization.",
+    "The platform will assist with expense processing but will not replace financial policies or the responsibilities of finance personnel."
+  ],
+  "data_requirements": [
+    "Users",
+    "Departments",
+    "Reporting relationships",
+    "Expenses",
+    "Expense categories",
+    "Receipts and supporting documents",
+    "Approval decisions",
+    "Comments",
+    "Notifications",
+    "Expense history",
+    "Relationships between an expense and its supporting information"
+  ],
+  "external_dependencies": [],
+  "success_criteria": [
+    "Employees can submit expenses through a centralized platform.",
+    "Receipt information can be captured with reduced manual entry.",
+    "Managers can review and process expenses through the platform.",
+    "Employees can track the progress of their submissions.",
+    "Finance users can identify and investigate expenses requiring attention.",
+    "Management can obtain useful expense information through reporting.",
+    "Expense actions can be traced through an audit history.",
+    "The organization experiences a reduction in manual expense-processing effort."
+  ],
+  "extraction_metadata": {
+    "milestone": "1",
+    "parser": "markdown",
+    "provider": "gemini",
+    "document_validity": "valid",
+    "resolved": "true",
+    "workflow_run_id": "RUN-D7D413C7D4DC",
+    "project_id": "PROJ-E7331B735899",
+    "human_answers": [
+      {
+        "question_id": "Q-001",
+        "answer": "OAuth2 JWT"
+      },
+      {
+        "question_id": "Q-002",
+        "answer": "OAuth2 JWT"
+      }
+    ],
+    "human_clarifications": [
+      {
+        "question_id": "Q-001",
+        "question": "Which specific fields from the expense creation attributes must be designated as mandatory for an expense submission to proceed?",
+        "answer": "OAuth2 JWT"
+      },
+      {
+        "question_id": "Q-002",
+        "question": "What specific business rules, conditions, or thresholds should the platform use to automatically flag inconsistent or exceptional expenses for the finance team?",
+        "answer": "OAuth2 JWT"
+      }
+    ],
+    "ai_recommendations": [],
+    "revision_count": 0,
+    "rejection_feedback": ""
+  }
+}

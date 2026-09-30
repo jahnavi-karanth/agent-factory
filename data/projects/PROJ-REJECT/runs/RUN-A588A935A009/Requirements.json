@@ -1,0 +1,67 @@
+{
+  "brd_id": "BRD-61415855EA6D",
+  "title": "Corporate Expense Management Platform",
+  "source_filename": "test2.md",
+  "business_problem": "Expense tracking.",
+  "business_objectives": [
+    "Automate expenses."
+  ],
+  "stakeholders": [
+    "Employees"
+  ],
+  "user_roles": [
+    "Employee",
+    "Manager"
+  ],
+  "requirements": [
+    {
+      "id": "REQ-001",
+      "type": "functional",
+      "description": "Users submit expenses. Revision feedback to address (human-provided): Add SLA requirement for approval.",
+      "source": {
+        "section": null,
+        "title": null,
+        "line_start": null,
+        "line_end": null
+      },
+      "priority": null
+    },
+    {
+      "id": "REQ-002",
+      "type": "functional",
+      "description": "Manager approval threshold required. Clarification decision (human-provided): The manager threshold is five hundred dollars.",
+      "source": {
+        "section": null,
+        "title": null,
+        "line_start": null,
+        "line_end": null
+      },
+      "priority": null
+    }
+  ],
+  "non_functional_requirements": [],
+  "business_rules": [],
+  "constraints": [],
+  "assumptions": [],
+  "data_requirements": [],
+  "external_dependencies": [],
+  "success_criteria": [],
+  "extraction_metadata": {
+    "milestone": "1",
+    "parser": "markdown",
+    "provider": "gemini",
+    "document_validity": "valid",
+    "resolved": "true",
+    "workflow_run_id": "RUN-A588A935A009",
+    "project_id": "PROJ-REJECT",
+    "human_answers": [
+      {
+        "question_id": "Q-001",
+        "answer": "The manager threshold is five hundred dollars."
+      }
+    ],
+    "ai_recommendations": [],
+    "revision_count": 1,
+    "rejection_feedback": "Add SLA requirement for approval."
+  }
+}

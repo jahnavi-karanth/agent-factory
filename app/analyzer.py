@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import re
 from typing import Any, Dict, Optional
 
 from .analysis_models import RequirementsAnalysis
@@ -65,6 +67,36 @@ class RequirementsAnalyzer:
         payload = dict(raw)
         payload["issues"] = [normalized for item in self._as_list(payload.get("issues")) if (normalized := self._normalize_issue(item)) is not None]
         payload["clarification_questions"] = [normalized for item in self._as_list(payload.get("clarification_questions")) if (normalized := self._normalize_question(item)) is not None]
+        issue_ids = {item["issue_id"] for item in payload["issues"]}
+        for question in payload["clarification_questions"]:
+            if question["issue_id"] not in issue_ids:
+                suffix = str(question["issue_id"]).split("-", 1)[-1]
+                matches = [issue_id for issue_id in issue_ids if issue_id.endswith(f"-{suffix}")]
+                if matches:
+                    affected = set(question.get("affected_requirements", []))
+                    matching_issues = [item["issue_id"] for item in payload["issues"] if item["issue_id"] in matches and affected.intersection(item.get("affected_requirements", []))]
+                    question["issue_id"] = matching_issues[0] if matching_issues else sorted(matches)[0]
+        max_questions = int(os.getenv("MAX_CLARIFICATION_QUESTIONS", "20"))
+        if requirements.extraction_metadata.get("document_validity") == "invalid":
+            payload["quality_status"] = "INVALID"
+            payload["status_reason"] = "The uploaded document does not contain enough generic business-requirements structure to be treated as a BRD."
+            payload["blocking_issues"] = []
+        elif not requirements.requirements:
+            payload["quality_status"] = "INVALID"
+            payload["status_reason"] = "The Requirements Model contains no meaningful requirements."
+            payload["blocking_issues"] = []
+        elif len(payload["clarification_questions"]) > max_questions:
+            payload["quality_status"] = "NEEDS_REWORK"
+            payload["status_reason"] = f"The analysis produced more than the configured maximum of {max_questions} clarification questions."
+            payload["blocking_issues"] = [item.get("issue_id", "") for item in payload["issues"]]
+        elif any(item.get("severity") == "CRITICAL" for item in payload["issues"]):
+            payload["quality_status"] = "NEEDS_REWORK"
+            payload["status_reason"] = "The analysis contains a critical unresolved issue that requires BRD rework before clarification."
+            payload["blocking_issues"] = [item.get("issue_id", "") for item in payload["issues"] if item.get("severity") == "CRITICAL"]
+        elif any(item.get("severity") in {"HIGH", "CRITICAL"} and item.get("clarification_required") for item in payload["issues"]):
+            payload["quality_status"] = "READY_FOR_CLARIFICATION"
+        else:
+            payload["quality_status"] = "READY" if not payload["clarification_questions"] else "READY_FOR_CLARIFICATION"
         payload.update({
             "brd_id": requirements.brd_id,
             "analysis_id": self._analysis_id(requirements),
@@ -78,6 +110,78 @@ class RequirementsAnalyzer:
             raise ExtractionError(f"invalid Requirements Analysis from extractor: {exc}") from exc
         logger.info("requirements analysis completed brd_id=%s issues=%d", requirements.brd_id, len(result.issues))
         return result
+
+    def generate_follow_up_questions(self, requirements: RequirementsModel, analysis: RequirementsAnalysis, answers: list[dict], round_number: int) -> list[dict]:
+        if round_number > int(os.getenv("MAX_FOLLOW_UP_ROUNDS", "2")):
+            return []
+        schema = {
+            "type": "object",
+            "required": ["questions"],
+            "properties": {"questions": {"type": "array", "items": {"type": "object", "required": ["question_id", "issue_id", "question", "reason", "priority"], "properties": {"question_id": {"type": "string"}, "issue_id": {"type": "string"}, "question": {"type": "string"}, "reason": {"type": "string"}, "priority": {"type": "string"}}}}},
+        }
+        prompt = f"""Review only the persisted Requirements Model, the original analysis, and the human answers below. Determine whether the answers reveal a genuinely new, material business ambiguity. If not, return an empty questions array. Do not create questions merely to use a round. Do not invent decisions, technical solutions, thresholds, actors, or policies. Questions must be neutral and reference an existing issue_id. This is bounded follow-up round {round_number}. Return at most 5 questions and use IDs Q-{round_number:01d}01, Q-{round_number:01d}02, etc.\n\nMODEL:\n{requirements.model_dump_json()}\nANALYSIS:\n{analysis.model_dump_json()}\nANSWERS:\n{json.dumps(answers)}"""
+        quality_flags = self._answer_quality_flags(answers)
+        if not quality_flags:
+            return []
+        raw = self.extractor.generate_json(prompt + f"\nANSWER QUALITY FLAGS:\n{json.dumps(quality_flags)}", schema)
+        result = []
+        issue_ids = {item.issue_id for item in analysis.issues}
+        existing_ids = {item.question_id for item in analysis.clarification_questions}
+        for index, item in enumerate(self._as_list(raw.get("questions") if isinstance(raw, dict) else []), start=1):
+            if not isinstance(item, dict):
+                continue
+            issue_id = item.get("issue_id") or ""
+            question = item.get("question") or ""
+            if issue_id not in issue_ids or not question:
+                continue
+            question_id = item.get("question_id") or f"Q-{round_number:01d}{index:02d}"
+            if question_id in existing_ids:
+                question_id = f"Q-{round_number:01d}{index:02d}"
+            affected = next((issue.affected_requirements for issue in analysis.issues if issue.issue_id == issue_id), [])
+            result.append({"question_id": question_id, "issue_id": issue_id, "affected_requirements": affected, "question": question, "reason": item.get("reason") or "The human answer revealed a new ambiguity.", "priority": str(item.get("priority") or "MEDIUM").upper(), "round": round_number})
+        if not result:
+            question_lookup = {item.question_id: item for item in analysis.clarification_questions}
+            for index, flag in enumerate(quality_flags, start=1):
+                original = question_lookup.get(flag.get("question_id"))
+                issue_id = original.issue_id if original else (flag.get("issue_id") or "")
+                if not issue_id:
+                    continue
+                affected = original.affected_requirements if original else []
+                priority = original.priority if original else "MEDIUM"
+                question_text = original.question if original else flag.get("question", "the clarification question")
+                question_text = re.sub(r"^Please provide a specific, direct answer to the original question:\s*", "", question_text, flags=re.I).strip()
+                question_text = re.sub(r"\s*If this is undecided, say whether you want the AI to recommend the best option\.?\s*$", "", question_text, flags=re.I).strip()
+                follow_up_text = f"Please answer this question specifically: {question_text} If the decision is undecided, say whether you want the AI to recommend the best option."
+                result.append({"question_id": f"Q-{round_number:01d}{index:02d}", "issue_id": issue_id, "affected_requirements": affected, "question": follow_up_text, "reason": flag["reason"], "priority": priority, "round": round_number})
+        return result
+
+    @staticmethod
+    def _answer_quality_flags(answers: list[dict]) -> list[dict]:
+        stop_words = {"the", "and", "for", "with", "what", "which", "should", "must", "are", "is", "be", "to", "of", "in", "on", "a", "an", "or", "users", "system"}
+        undecided = re.compile(r"\b(undecided|not decided|not determined|unknown|unsure|tbd|to be decided|no decision|not specified|i don't know)\b", re.I)
+        flags = []
+        for item in answers:
+            answer = str(item.get("answer", "")).strip()
+            question = str(item.get("question", ""))
+            answer_terms = {term[:4] for term in re.findall(r"[a-z]{4,}", answer.lower()) if term not in stop_words}
+            question_terms = {term[:4] for term in re.findall(r"[a-z]{4,}", question.lower()) if term not in stop_words}
+            overlap = len(answer_terms & question_terms) / max(1, min(len(question_terms), 5))
+            reason = None
+            if undecided.search(answer):
+                reason = "The answer explicitly leaves the requested decision undecided."
+            elif len(answer_terms) < 3:
+                reason = "The answer is too short to resolve the requested business decision."
+            elif question_terms and overlap == 0:
+                reason = "The answer does not address the key terms in the clarification question."
+            if reason:
+                flags.append({"question_id": item.get("question_id"), "issue_id": item.get("issue_id"), "question": question, "reason": reason})
+        return flags
+
+    def generate_best_decisions(self, requirements: RequirementsModel, analysis: RequirementsAnalysis, answers: list[dict]) -> list[dict]:
+        schema = {"type": "object", "required": ["decisions"], "properties": {"decisions": {"type": "array", "items": {"type": "object", "required": ["question_id", "decision", "reason"], "properties": {"question_id": {"type": "string"}, "decision": {"type": "string"}, "reason": {"type": "string"}}}}}}
+        prompt = f"""For each flagged unanswered or irrelevant clarification answer, choose the most practical conservative business decision using only the supplied Requirements Model and question context. Do not invent unsupported facts. Prefer a minimal reversible option and clearly label it as an AI recommendation requiring review. Return one decision per flagged question.\nMODEL:\n{requirements.model_dump_json()}\nANALYSIS:\n{analysis.model_dump_json()}\nANSWERS:\n{json.dumps(answers)}"""
+        raw = self.extractor.generate_json(prompt, schema)
+        return [item for item in self._as_list(raw.get("decisions") if isinstance(raw, dict) else []) if isinstance(item, dict) and item.get("question_id") and item.get("decision")]
 
     @staticmethod
     def _as_list(value: Any) -> list:
@@ -104,9 +208,10 @@ class RequirementsAnalyzer:
         normalized["clarification_required"] = bool(normalized.get("clarification_required", normalized.get("clarificationRequired", True)))
         if isinstance(normalized.get("issue_id"), str):
             issue_id = normalized["issue_id"].upper()
-            if issue_id.startswith("ISS-"):
+            if not re.match(r"^(AMB|GAP|CON|INC)-[0-9]{3,}$", issue_id):
                 prefix = {"ambiguity": "AMB", "gap": "GAP", "conflict": "CON", "inconsistency": "INC"}.get(normalized["type"], "GAP")
-                normalized["issue_id"] = prefix + issue_id[3:]
+                suffix = issue_id.split("-", 1)[-1] if "-" in issue_id else "001"
+                normalized["issue_id"] = f"{prefix}-{suffix.zfill(3)}"
         return {key: normalized[key] for key in ("issue_id", "type", "severity", "title", "description", "affected_requirements", "reason", "clarification_required", "severity_reason")}
 
     @staticmethod

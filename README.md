@@ -1,190 +1,204 @@
 # AI Software Development Factory
 
-## Milestone 1: BRD Ingestion
+## Overview
 
-This repository implements Milestones 1 and 2 plus persistence for their artifacts: accepting a user-supplied Business Requirements Document, producing a validated Requirements Model, analyzing it for material uncertainty, and persisting the resulting issues and clarification questions. It does **not** implement Pattern KB/RAG, architecture generation, code generation, or validation of generated software.
+This repository implements the **AI Software Development Factory** backend:
+- **Milestone 1**: Project management, authentication, FileStore file storage, multi-format document ingestion (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.md`, `.txt`), parsing, section/chunk extraction, SQLite persistence, ChromaDB vector store embeddings with mandatory `project_id` metadata and isolation, and document status/sections APIs.
+- **Milestone 2**: Requirements Analysis, quality status classification (`INVALID`, `NEEDS_REWORK`, `READY_FOR_CLARIFICATION`, `READY`), gap/ambiguity issue identification, and neutral clarification questions.
+- **Milestone 3**: Human-in-the-Loop (HITL) WebSocket clarification sessions, follow-up round generation, best-decision fallbacks, workflow runs, and event streams.
+- **Pattern Knowledge Base**: Global architectural & agentic pattern registry (source-of-truth in SQLite `patterns` table, semantic search index in ChromaDB `patterns` collection), startup idempotent seeding from `seed_patterns.json` (includes all 10 canonical patterns: ReAct, Reflection, Planner-Executor, Multi-Agent Debate, Router, RAG, Tool-Use, Hierarchical Agents, Critic-Refine, Map-Reduce), REST CRUD APIs, and tag-filtered semantic vector search.
 
-### Architecture
+---
+
+## Change History & Reference Log
+
+### 1. Changes Made Prior to M1 Completion Prompt
+- **OpenAPI Authorize Button Fix**: Updated `app/auth.py` to use FastAPI's `HTTPBearer(auto_error=False)` security scheme instead of a plain header parameter. This populates `components.securitySchemes` in `openapi.json` and renders the green **Authorize** padlock button at the top right of Swagger UI (`/docs`).
+- **Environment Variable Loading (.env)**: Added `load_dotenv()` in `app/main.py` and `app/llm.py` so that `os.getenv("GEMINI_API_KEY")` and other parameters automatically load from `.env` on server startup.
+- **`python-dotenv` Dependency**: Added `python-dotenv>=1.0,<2` to `requirements.txt`.
+
+### 2. Changes Made for Official Milestone 1 Completion
+- **FileStore Abstraction** ([`app/filestore.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/filestore.py)):
+  - Implemented `FileStore` class storing uploaded raw files at `./data/projects/{project_id}/uploads/{document_id}.{ext}`.
+  - Built-in path traversal defenses against malicious filenames (`../../evil.txt`, absolute paths, special characters).
+- **Database Schema Extensions** ([`app/repository.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/repository.py)):
+  - Updated `projects` table to include `status` (`draft`, `ready`, `running`, `archived`) and `updated_at`.
+  - Added tables `documents`, `document_sections`, and `document_chunks` for persistence.
+  - Added repository CRUD methods: `list_projects`, `update_project`, `save_document`, `get_document`, `save_document_sections_and_chunks`, `list_document_sections`, and `list_document_chunks`.
+- **Alembic Migration** ([`alembic/versions/0004_documents_and_project_status.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/alembic/versions/0004_documents_and_project_status.py)):
+  - Created migration `0004_documents_and_project_status` for reproducible schema setup.
+- **Document Parser & Chunking** ([`app/parser.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/parser.py)):
+  - Extended text extraction for all 6 supported file formats (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.md`, `.txt`).
+  - Implemented `extract_sections_and_chunks()` returning `ParsedSection` and `ParsedChunk` with stable section IDs (`SEC-001`, `SEC-002`...) and chunk IDs.
+- **Vector Store Embeddings & Project Isolation** ([`app/document_store.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/document_store.py)):
+  - Added `add_chunks()` method storing chunk-level entries in ChromaDB's `documents` collection with mandatory metadata: `document_id`, `section_id`, `section_title`, `page`, `kind`, `project_id`.
+  - Enforced `where={"project_id": project_id}` filter on all vector search operations.
+- **REST API Endpoints** ([`app/main.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/main.py)):
+  - `POST /auth/login` (alias for `POST /auth/token`)
+  - `POST /projects` (creates project, validates status in `draft`, `ready`, `running`, `archived`)
+  - `GET /projects` (lists all projects owned by authenticated user)
+  - `GET /projects/{project_id}` (retrieves single project; 404 if unauthorized/missing)
+  - `PATCH /projects/{project_id}` (updates project name and/or status; 404 if unauthorized/missing)
+  - `POST /projects/{project_id}/documents` (multipart file upload for all 6 formats, FileStore storage, parsing, DB persistence, and ChromaDB chunk vector embedding)
+  - `GET /projects/{project_id}/documents/{document_id}` (retrieves document parse status & section/chunk counts)
+  - `GET /projects/{project_id}/documents/{document_id}/sections` (retrieves structured document sections)
+- **Official Milestone 1 Tests** ([`tests/test_m1_official.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/tests/test_m1_official.py)):
+  - Added 9 comprehensive integration test functions covering authentication, project lifecycle & isolation, all 6 file formats, path traversal defense, document status, section structure, and ChromaDB project isolation search.
+
+### 3. Changes Made for Pattern Knowledge Base
+- **Pydantic Models** ([`app/pattern_models.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/pattern_models.py)):
+  - Defined `PatternModel`, `PatternCreateRequest`, `PatternUpdateRequest`, `PatternSearchRequest`, `PatternSearchResult`.
+- **Database Schema & Migration** ([`app/repository.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/repository.py), [`alembic/versions/0005_patterns_table.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/alembic/versions/0005_patterns_table.py)):
+  - Created relational `patterns` table in SQLite (`id`, `name`, `intent`, `structure`, `when_to_use`, `when_not_to_use`, `prerequisites`, `references`, `tags`, `description`, `strengths`, `weaknesses`, `created_at`, `updated_at`).
+  - Implemented repository methods: `save_pattern`, `get_pattern`, `get_pattern_by_name`, `list_patterns`, `update_pattern`, `delete_pattern`.
+- **Semantic Vector Indexing** ([`app/document_store.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/document_store.py)):
+  - Created ChromaDB `patterns` collection.
+  - Implemented deterministic embedding text construction (`intent + structure + when_to_use`), `add_pattern_vector`, `delete_pattern_vector`, and `search_patterns`.
+- **Pattern Service & Startup Seeding** ([`app/pattern_service.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/pattern_service.py)):
+  - Implemented idempotent startup pattern seeding from `seed_patterns.json` at root.
+  - Managed complete DB and Chroma synchronization on pattern creation, updates, deletions, and searches.
+- **REST Endpoints & Route Wiring** ([`app/main.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/main.py)):
+  - Registered `POST /patterns`, `POST /patterns/bulk`, `POST /patterns/search`, `GET /patterns`, `GET /patterns/{pattern_id}`, `PATCH /patterns/{pattern_id}`, `DELETE /patterns/{pattern_id}`.
+- **Test Suite** ([`tests/test_patterns.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/tests/test_patterns.py)):
+  - Added 6 test functions verifying startup seeding, CRUD operations, bulk creation, semantic vector search, tag filtering, and stale vector cleanup.
+
+---
+
+## Architecture Overview
 
 ```text
-User / Client
-    |
-    v
-POST /api/brd/upload
-    |
-    v
-File validation (extension, UTF-8, size, empty input)
-    |
-    v
-Markdown/TXT document parser -> normalized document
-    |
-    v
-RequirementExtractor interface -> GeminiExtractor
-    |
-    v
-Pydantic RequirementsModel validation
-    |
-    v
-SQLite repository: BRD + Requirements Model + Requirements
-    |
-    v
-POST /api/requirements/analyze {"brd_id": "..."}
-    |
-    v
-Milestone 2 analysis -> SQLite: Analysis + Issues + Questions
+Client / Frontend
+    │
+    ├── POST /auth/register & POST /auth/login -> JWT Token
+    │
+    ├── POST /projects -> Create Project Aggregate (status: draft|ready|running|archived)
+    │
+    ├── POST /projects/{project_id}/documents (Multipart upload: .pdf, .docx, .pptx, .xlsx, .md, .txt)
+    │     ├── FileStore -> ./data/projects/{project_id}/uploads/{document_id}.{ext}
+    │     ├── Parser -> Text & Headings Extraction -> Sections & Chunks (SEC-001, CHK-001)
+    │     ├── SQLite Repository -> Persist documents, document_sections, document_chunks
+    │     └── DocumentStore (ChromaDB) -> Upsert chunks to `documents` collection
+    │           └── Mandatory Metadata: document_id, section_id, section_title, page, kind, project_id
+    │
+    ├── GET /projects/{project_id}/documents/{document_id} -> Status & counts
+    ├── GET /projects/{project_id}/documents/{document_id}/sections -> Section outline
+    ├── GET /projects/{project_id}/documents/search?q=... -> Project-filtered vector search (where={"project_id": project_id})
+    │
+    └── Pattern Knowledge Base (Global Resource):
+          ├── Startup Seeding -> Reads seed_patterns.json -> Synchronizes SQLite & ChromaDB
+          ├── POST /patterns & POST /patterns/bulk -> Create pattern(s)
+          ├── GET /patterns & GET /patterns/{id} -> List / fetch patterns from SQLite (source of truth)
+          ├── PATCH /patterns/{id} & DELETE /patterns/{id} -> Update / delete pattern & sync ChromaDB
+          └── POST /patterns/search -> Semantic search via ChromaDB (intent + structure + when_to_use)
 ```
 
-The repository BRDs are development fixtures only. Normal operation accepts uploaded content and does not read a BRD from the repository.
+---
 
-## Supported input
+## Supported Input Formats
 
-The supplied BRDs are Markdown files, so Milestone 1 supports `.md`, `.markdown`, and `.txt` UTF-8 documents. PDF/DOCX parsing is intentionally deferred until a provided BRD requires it. The default maximum upload size is 10 MiB and can be changed with `MAX_UPLOAD_BYTES`.
+- **Markdown**: `.md`, `.markdown`
+- **Plain Text**: `.txt`
+- **PDF**: `.pdf`
+- **Word Document**: `.docx`
+- **PowerPoint Presentation**: `.pptx`
+- **Excel Spreadsheet**: `.xlsx`
 
-## Prerequisites and setup
+Maximum upload size defaults to 10 MiB (configurable via `MAX_UPLOAD_BYTES`).
+
+---
+
+## Setup & Quickstart
+
+### 1. Installation
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set `GEMINI_API_KEY` in `.env` or in the process environment. The key is never stored in source code or logged. The default primary model is `gemini-3.5-flash-lite`. Optional variables are `GEMINI_MODEL`, `GEMINI_FALLBACK_MODEL` (default `gemini-3.5-flash`), `GEMINI_TIMEOUT_SECONDS` (default `180`), `GEMINI_MAX_RETRIES` (default `2`), `MAX_UPLOAD_BYTES`, `LOG_LEVEL`, and `DATABASE_PATH` (default `data/agent_factory.sqlite3`). A transient Gemini `503 UNAVAILABLE` response is retried with bounded exponential backoff and then attempted with the fallback model.
+### 2. Database Migrations
 
-## Run the application
-
-```bash
-python -m uvicorn app.main:app --reload
-```
-
-Interactive OpenAPI documentation is available at <http://127.0.0.1:8000/docs>.
-
-## Upload a BRD
+Run Alembic schema migrations:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/brd/upload \
-  -F "file=@'Business Requirements Document — Corporate Expense Management Platform.md';type=text/markdown"
+alembic upgrade head
 ```
 
-The request is multipart form data with one field named `file`. A successful response has this shape:
+### 3. Running the Server
 
+Start the Uvicorn development server:
+
+```bash
+uv run uvicorn app.main:app --reload --port 8000
+```
+
+Open interactive Swagger UI docs at: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+
+---
+
+## End-to-End API Usage Guide
+
+### 1. Register and Login
+
+```bash
+# Register User
+curl -X POST http://127.0.0.1:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"dev@example.com","password":"Password123!"}'
+
+# Login to get JWT Token
+curl -X POST http://127.0.0.1:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"dev@example.com","password":"Password123!"}'
+```
+
+Response:
 ```json
 {
-  "brd_id": "BRD-<content-hash>",
-  "title": "...",
-  "source_filename": "requirements.md",
-  "business_problem": "...",
-  "business_objectives": [],
-  "stakeholders": [],
-  "user_roles": [],
-  "requirements": [
-    {
-      "id": "REQ-001",
-      "type": "functional",
-      "description": "...",
-      "source": {"section": "7.1", "title": "...", "line_start": null, "line_end": null},
-      "priority": null
-    }
-  ],
-  "non_functional_requirements": [],
-  "business_rules": [],
-  "constraints": [],
-  "assumptions": [],
-  "data_requirements": [],
-  "external_dependencies": [],
-  "success_criteria": [],
-  "extraction_metadata": {"milestone": "1", "parser": "markdown", "provider": "gemini"}
+  "access_token": "<jwt-token-string>",
+  "token_type": "bearer"
 }
 ```
 
-If the file is invalid, empty, too large, unsupported, or Gemini cannot produce a valid model, the API returns a structured error with `error` and `detail` fields. No fallback requirements are fabricated.
-
-## Tests
-
-Tests mock the extraction provider, so they do not require a live Gemini key:
+### 2. Pattern Knowledge Base APIs
 
 ```bash
-pytest -q
+# List all patterns
+curl -X GET http://127.0.0.1:8000/patterns
+
+# List patterns by tag
+curl -X GET http://127.0.0.1:8000/patterns?tag=reasoning
+
+# Get pattern details by ID
+curl -X GET http://127.0.0.1:8000/patterns/PAT-001
+
+# Semantic search for patterns
+curl -X POST http://127.0.0.1:8000/patterns/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"iterative reasoning with external tools","top_k":3}'
+
+# Create custom pattern
+curl -X POST http://127.0.0.1:8000/patterns \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Custom Agent Pattern",
+    "intent": "Solve multi-step tasks using specialized sub-agents",
+    "structure": ["Decompose", "Delegate", "Synthesize"],
+    "when_to_use": ["Complex modular workflows"],
+    "tags": ["multi-agent", "custom"]
+  }'
 ```
 
-The suite covers health, upload, parsing, stable IDs, schema validation, source traceability, generic processing of another BRD, unsupported/empty files, and provider failure handling.
+---
 
-## Schema design
+## Test Execution
 
-The model adds `source_filename`, `extraction_metadata`, and a structured `SourceReference` to the suggested schema. These preserve upload provenance and leave room for later traceability without changing the core requirement shape. Missing BRD categories remain empty lists or `null`; priorities are never inferred.
-
-## SQLite persistence
-
-The application uses SQLite through `app/repository.py`; route handlers and Gemini code do not contain SQL. The default database file is:
-
-```text
-data/agent_factory.sqlite3
-```
-
-Set `DATABASE_PATH` to choose another location. The database contains `brds`, `requirements_models`, `requirements`, `analyses`, `issues`, `issue_requirements`, `clarification_questions`, and `question_requirements`. Foreign keys and indexes preserve BRD → Requirements Model → Requirement → Analysis → Issue/Question traceability. Every upload creates a persisted Requirements Model version, and every analysis creates a separate analysis record; prior analyses are not silently overwritten.
-
-### Persisted workflow
-
-1. `POST /api/brd/upload` validates and extracts the BRD, persists its metadata, Requirements Model, and individual requirements, then returns the model.
-2. `POST /api/requirements/analyze` accepts `{"brd_id": "BRD-..."}`, retrieves the latest persisted Requirements Model, analyzes it, atomically persists the analysis, issues, questions, and relationships, then returns the result.
-3. The previous full Requirements Model request format remains supported for compatibility, but the recommended workflow uses only `brd_id`.
-
-### Retrieval APIs
-
-```text
-GET /api/brd/{brd_id}/requirements
-GET /api/analysis/{analysis_id}
-```
-
-The first returns the persisted Requirements Model with stable requirement IDs and source references. The second returns the persisted analysis, summary, issues, questions, and affected requirement relationships. Data survives application restarts.
-
-### Reset the development database
-
-Stop the application, then remove the local SQLite file:
+Run the complete test suite (90 tests):
 
 ```bash
-rm -f data/agent_factory.sqlite3
+uv run pytest
 ```
 
-The database is recreated automatically at the next application start. Do not remove a database containing artifacts you need to retain.
-
-## Known limitations and assumptions
-
-- Gemini is the only production extractor currently implemented, behind the `RequirementExtractor` interface.
-- Only UTF-8 Markdown/plain text is supported because those are the formats present in the supplied fixtures.
-- SQLite is intended for the current development/demo environment; the repository abstraction allows a later datastore replacement.
-- Requirement ordering and IDs are validated as sequential `REQ-001`, `REQ-002`, etc. The extractor is instructed to emit them in document order.
-- Milestone 2 identifies ambiguity, gaps, conflicts, and inconsistencies but does not accept human answers or resolve requirements.
-
-## Milestone 2: Requirements Analysis and Clarification Questions
-
-Milestone 2 consumes the validated Milestone 1 Requirements Model directly. It does not re-parse the original BRD and does not require a database. It asks Gemini to identify only meaningful ambiguity, gaps, conflicts, and inconsistencies, then validates all issue and question references deterministically.
-
-### Analyze a Requirements Model
-
-```text
-POST /api/requirements/analyze
-Content-Type: application/json
-```
-
-The recommended request body contains only the BRD ID persisted by Milestone 1:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/requirements/analyze \
-  -H 'Content-Type: application/json' \
-  -d '{"brd_id":"BRD-..."}'
-```
-
-The response contains `analysis_id`, `status`, a summary, structured issues, and neutral clarification questions. Existing requirement IDs are preserved and every referenced ID must exist in the submitted model.
-
-Issue severity uses this vocabulary:
-
-| Severity | Meaning |
-|---|---|
-| `LOW` | Minor uncertainty unlikely to affect architecture |
-| `MEDIUM` | Could affect implementation or one component |
-| `HIGH` | Could materially affect workflow, data, security, integrations, or architecture |
-| `CRITICAL` | Could fundamentally change the design or make implementation incorrect |
-
-Milestone 2 does not accept human answers or modify requirements. Human answer resolution belongs to a later milestone.
+All tests mock external services and run locally using temporary SQLite databases and Chroma stores.
