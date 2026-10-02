@@ -29,6 +29,11 @@ class IngestionService:
         logger.info("requirements validation completed filename=%s count=%d", document.filename, len(model.requirements))
         return model
 
+    def extract_requirements_model(self, content: str, file_type: str = "markdown", source_filename: str = "document.md") -> RequirementsModel:
+        from .parser import parse_document
+        doc = parse_document(source_filename, content.encode("utf-8"))
+        return self.ingest(doc)
+
     @staticmethod
     def _validate_and_enrich(raw: Dict[str, Any], document: NormalizedDocument) -> RequirementsModel:
         payload = dict(raw)

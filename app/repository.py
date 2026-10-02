@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -289,6 +290,95 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS planning_runs (
+                    run_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(project_id),
+                    workflow_type TEXT NOT NULL,
+                    source_model_version_id INTEGER,
+                    resolved_model_version_id INTEGER,
+                    status TEXT NOT NULL,
+                    current_stage TEXT NOT NULL,
+                    planning_route TEXT NOT NULL,
+                    iteration_count INTEGER NOT NULL DEFAULT 0,
+                    token_usage INTEGER NOT NULL DEFAULT 0,
+                    estimated_cost REAL NOT NULL DEFAULT 0.0,
+                    approval_status TEXT NOT NULL DEFAULT 'PENDING',
+                    rejection_feedback TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS selected_patterns (
+                    run_id TEXT NOT NULL REFERENCES planning_runs(run_id) ON DELETE CASCADE,
+                    pattern_id TEXT NOT NULL,
+                    pattern_name TEXT NOT NULL,
+                    rationale TEXT NOT NULL,
+                    addressed_requirement_ids TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 1.0,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, pattern_id)
+                );
+                CREATE TABLE IF NOT EXISTS research_findings (
+                    run_id TEXT NOT NULL REFERENCES planning_runs(run_id) ON DELETE CASCADE,
+                    finding_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    citation_tag TEXT NOT NULL,
+                    claim TEXT NOT NULL,
+                    evidence TEXT NOT NULL,
+                    source_url TEXT,
+                    document_id TEXT,
+                    section_id TEXT,
+                    pattern_id TEXT,
+                    confidence REAL NOT NULL DEFAULT 1.0,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, finding_id)
+                );
+                CREATE TABLE IF NOT EXISTS architecture_documents (
+                    run_id TEXT PRIMARY KEY REFERENCES planning_runs(run_id) ON DELETE CASCADE,
+                    markdown_path TEXT,
+                    markdown_content TEXT,
+                    json_path TEXT,
+                    structured_json TEXT,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS planning_tasks (
+                    run_id TEXT NOT NULL REFERENCES planning_runs(run_id) ON DELETE CASCADE,
+                    task_id TEXT NOT NULL,
+                    sequence_number INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    target_files TEXT NOT NULL,
+                    acceptance_criteria TEXT NOT NULL,
+                    dependency_task_ids TEXT NOT NULL,
+                    pattern_ids TEXT NOT NULL,
+                    requirement_ids TEXT NOT NULL,
+                    research_citation_tags TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'PLANNED',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, task_id)
+                );
+                CREATE TABLE IF NOT EXISTS planning_validation_results (
+                    run_id TEXT NOT NULL REFERENCES planning_runs(run_id) ON DELETE CASCADE,
+                    validation_iteration INTEGER NOT NULL,
+                    passed INTEGER NOT NULL,
+                    coverage_errors TEXT NOT NULL DEFAULT '[]',
+                    ordering_errors TEXT NOT NULL DEFAULT '[]',
+                    pattern_fidelity_errors TEXT NOT NULL DEFAULT '[]',
+                    atomicity_errors TEXT NOT NULL DEFAULT '[]',
+                    details TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id, validation_iteration)
+                );
+                CREATE TABLE IF NOT EXISTS planning_approval_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL REFERENCES planning_runs(run_id) ON DELETE CASCADE,
+                    decision TEXT NOT NULL,
+                    feedback TEXT,
+                    actor TEXT,
+                    created_at TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_hitl_analysis ON hitl_sessions(analysis_id);
                 CREATE INDEX IF NOT EXISTS idx_models_brd ON requirements_models(brd_id, version);
                 CREATE INDEX IF NOT EXISTS idx_requirements_id ON requirements(requirement_id);
@@ -302,6 +392,7 @@ class SQLiteRepository:
                 CREATE INDEX IF NOT EXISTS idx_sections_doc ON document_sections(document_id);
                 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(document_id);
                 CREATE INDEX IF NOT EXISTS idx_patterns_name ON patterns(name);
+                CREATE INDEX IF NOT EXISTS idx_planning_runs_project ON planning_runs(project_id, created_at);
                 """
             )
             # Ensure migration columns for projects if created with older schema
@@ -904,3 +995,388 @@ class SQLiteRepository:
             db.execute("DELETE FROM patterns WHERE pattern_id=?", (p_id,))
             db.commit()
         return existing
+
+    def create_planning_run(
+        self,
+        run_id: str,
+        project_id: str,
+        workflow_type: str = "planning",
+        source_model_version_id: Optional[int] = None,
+        resolved_model_version_id: Optional[int] = None,
+        planning_route: str = "simple",
+        status: str = "STARTING",
+        current_stage: str = "INITIALIZING",
+    ) -> Dict[str, Any]:
+        now = utc_now()
+        with self.connection() as db:
+            db.execute("BEGIN")
+            db.execute(
+                "INSERT INTO planning_runs(run_id, project_id, workflow_type, source_model_version_id, resolved_model_version_id, status, current_stage, planning_route, iteration_count, token_usage, estimated_cost, approval_status, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,0,0,0.0,'PENDING',?,?)",
+                (run_id, project_id, workflow_type, source_model_version_id, resolved_model_version_id, status, current_stage, planning_route, now, now)
+            )
+            db.execute(
+                "INSERT INTO workflow_runs(run_id, project_id, workflow_type, brd_id, status, error, created_at, updated_at) "
+                "VALUES(?,?,?,NULL,?,?,?,?) "
+                "ON CONFLICT(run_id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at",
+                (run_id, project_id, workflow_type, status, None, now, now)
+            )
+            db.commit()
+        return self.get_planning_run(run_id, project_id=project_id)
+
+    def get_planning_run(self, run_id: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+        with self.connection() as db:
+            query = "SELECT * FROM planning_runs WHERE run_id=?"
+            args = [run_id]
+            if project_id:
+                query += " AND project_id=?"
+                args.append(project_id)
+            row = db.execute(query, args).fetchone()
+            if not row:
+                raise PersistenceError(f"planning run {run_id} not found")
+            res = dict(row)
+            p_count = db.execute("SELECT COUNT(*) as cnt FROM selected_patterns WHERE run_id=?", (run_id,)).fetchone()["cnt"]
+            t_count = db.execute("SELECT COUNT(*) as cnt FROM planning_tasks WHERE run_id=?", (run_id,)).fetchone()["cnt"]
+            res["selected_pattern_count"] = p_count
+            res["task_count"] = t_count
+            return res
+
+    def update_planning_run(
+        self,
+        run_id: str,
+        stage: Optional[str] = None,
+        status: Optional[str] = None,
+        error: Optional[str] = None,
+        approval_status: Optional[str] = None,
+        rejection_feedback: Optional[str] = None,
+        iteration_count: Optional[int] = None,
+        token_usage: Optional[int] = None,
+        estimated_cost: Optional[float] = None,
+        planning_route: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        now = utc_now()
+        with self.connection() as db:
+            updates = ["updated_at=?"]
+            args: list[Any] = [now]
+            if stage is not None:
+                updates.append("current_stage=?")
+                args.append(stage)
+            if status is not None:
+                updates.append("status=?")
+                args.append(status)
+            if error is not None:
+                updates.append("error=?")
+                args.append(error)
+            if approval_status is not None:
+                updates.append("approval_status=?")
+                args.append(approval_status)
+            if rejection_feedback is not None:
+                updates.append("rejection_feedback=?")
+                args.append(rejection_feedback)
+            if iteration_count is not None:
+                updates.append("iteration_count=?")
+                args.append(iteration_count)
+            if token_usage is not None:
+                updates.append("token_usage=?")
+                args.append(token_usage)
+            if estimated_cost is not None:
+                updates.append("estimated_cost=?")
+                args.append(estimated_cost)
+            if planning_route is not None:
+                updates.append("planning_route=?")
+                args.append(planning_route)
+            
+            args.append(run_id)
+            db.execute(f"UPDATE planning_runs SET {', '.join(updates)} WHERE run_id=?", args)
+            if status is not None:
+                db.execute("UPDATE workflow_runs SET status=?, error=?, updated_at=? WHERE run_id=?", (status, error, now, run_id))
+            db.commit()
+        return self.get_planning_run(run_id)
+
+    def save_selected_patterns(self, run_id: str, patterns: list[dict]) -> list[dict]:
+        now = utc_now()
+        with self.connection() as db:
+            db.execute("BEGIN")
+            db.execute("DELETE FROM selected_patterns WHERE run_id=?", (run_id,))
+            for p in patterns:
+                pid = p.get("pattern_id") or p.get("id")
+                pname = p.get("pattern_name") or p.get("name", pid)
+                rat = p.get("rationale", "")
+                reqs = p.get("addressed_requirement_ids", [])
+                conf = float(p.get("confidence", 1.0))
+                db.execute(
+                    "INSERT INTO selected_patterns(run_id, pattern_id, pattern_name, rationale, addressed_requirement_ids, confidence, created_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (run_id, pid, pname, rat, json.dumps(reqs), conf, now)
+                )
+            db.commit()
+        return self.get_selected_patterns(run_id)
+
+    def get_selected_patterns(self, run_id: str) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("SELECT * FROM selected_patterns WHERE run_id=? ORDER BY pattern_id", (run_id,)).fetchall()
+            results = []
+            for r in rows:
+                item = dict(r)
+                item["addressed_requirement_ids"] = json.loads(item["addressed_requirement_ids"])
+                results.append(item)
+            return results
+
+    def save_research_findings(self, run_id: str, findings: list[dict]) -> list[dict]:
+        now = utc_now()
+        with self.connection() as db:
+            db.execute("BEGIN")
+            db.execute("DELETE FROM research_findings WHERE run_id=?", (run_id,))
+            for f in findings:
+                fid = f.get("finding_id", f"FIND-{uuid.uuid4().hex[:8]}")
+                stype = f.get("source_type", "llm")
+                tag = f.get("citation_tag", "[llm]")
+                claim = f.get("claim", "")
+                ev = f.get("evidence", "")
+                surl = f.get("source_url")
+                docid = f.get("document_id")
+                secid = f.get("section_id")
+                patid = f.get("pattern_id")
+                conf = float(f.get("confidence", 1.0))
+                db.execute(
+                    "INSERT INTO research_findings(run_id, finding_id, source_type, citation_tag, claim, evidence, source_url, document_id, section_id, pattern_id, confidence, created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (run_id, fid, stype, tag, claim, ev, surl, docid, secid, patid, conf, now)
+                )
+            db.commit()
+        return self.get_research_findings(run_id)
+
+    def get_research_findings(self, run_id: str) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("SELECT * FROM research_findings WHERE run_id=? ORDER BY finding_id", (run_id,)).fetchall()
+            return [dict(r) for r in rows]
+
+    def save_architecture_document(
+        self,
+        run_id: str,
+        markdown_content: str,
+        structured_json: dict,
+        markdown_path: Optional[str] = None,
+        json_path: Optional[str] = None,
+        version: int = 1
+    ) -> dict:
+        now = utc_now()
+        s_json = json.dumps(structured_json) if isinstance(structured_json, dict) else str(structured_json)
+        with self.connection() as db:
+            db.execute("BEGIN")
+            db.execute(
+                "INSERT INTO architecture_documents(run_id, markdown_path, markdown_content, json_path, structured_json, version, created_at) "
+                "VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(run_id) DO UPDATE SET markdown_path=excluded.markdown_path, markdown_content=excluded.markdown_content, json_path=excluded.json_path, structured_json=excluded.structured_json, version=excluded.version, created_at=excluded.created_at",
+                (run_id, markdown_path, markdown_content, json_path, s_json, version, now)
+            )
+            db.commit()
+        return self.get_architecture_document(run_id)
+
+    def get_architecture_document(self, run_id: str) -> dict:
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM architecture_documents WHERE run_id=?", (run_id,)).fetchone()
+            if not row:
+                raise PersistenceError(f"no architecture document found for run {run_id}")
+            res = dict(row)
+            res["structured_json"] = json.loads(res["structured_json"]) if res["structured_json"] else {}
+            return res
+
+    def save_planning_tasks(self, run_id: str, tasks: list[dict]) -> list[dict]:
+        now = utc_now()
+        with self.connection() as db:
+            db.execute("BEGIN")
+            db.execute("DELETE FROM planning_tasks WHERE run_id=?", (run_id,))
+            for t in tasks:
+                tid = t.get("task_id")
+                seq = int(t.get("sequence_number", 1))
+                title = t.get("title", "")
+                desc = t.get("description", "")
+                t_files = json.dumps(t.get("target_files", []))
+                a_crit = json.dumps(t.get("acceptance_criteria", []))
+                deps = json.dumps(t.get("dependency_task_ids", []))
+                pats = json.dumps(t.get("pattern_ids", []))
+                reqs = json.dumps(t.get("requirement_ids", []))
+                cits = json.dumps(t.get("research_citation_tags", []))
+                status = t.get("status", "PLANNED")
+                db.execute(
+                    "INSERT INTO planning_tasks(run_id, task_id, sequence_number, title, description, target_files, acceptance_criteria, dependency_task_ids, pattern_ids, requirement_ids, research_citation_tags, status, created_at, updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (run_id, tid, seq, title, desc, t_files, a_crit, deps, pats, reqs, cits, status, now, now)
+                )
+            db.commit()
+        return self.get_planning_tasks(run_id)
+
+    def get_planning_tasks(self, run_id: str) -> list[dict]:
+        with self.connection() as db:
+            rows = db.execute("SELECT * FROM planning_tasks WHERE run_id=? ORDER BY sequence_number ASC", (run_id,)).fetchall()
+            results = []
+            for r in rows:
+                item = dict(r)
+                item["target_files"] = json.loads(item["target_files"])
+                item["acceptance_criteria"] = json.loads(item["acceptance_criteria"])
+                item["dependency_task_ids"] = json.loads(item["dependency_task_ids"])
+                item["pattern_ids"] = json.loads(item["pattern_ids"])
+                item["requirement_ids"] = json.loads(item["requirement_ids"])
+                item["research_citation_tags"] = json.loads(item["research_citation_tags"])
+                results.append(item)
+            return results
+
+    def update_planning_task(self, run_id: str, task_id: str, updates: dict) -> dict:
+        now = utc_now()
+        with self.connection() as db:
+            existing = db.execute("SELECT * FROM planning_tasks WHERE run_id=? AND task_id=?", (run_id, task_id)).fetchone()
+            if not existing:
+                raise PersistenceError(f"task {task_id} not found in run {run_id}")
+            
+            upd_cols = ["updated_at=?"]
+            args: list[Any] = [now]
+            
+            if "title" in updates:
+                upd_cols.append("title=?")
+                args.append(updates["title"])
+            if "description" in updates:
+                upd_cols.append("description=?")
+                args.append(updates["description"])
+            if "sequence_number" in updates:
+                upd_cols.append("sequence_number=?")
+                args.append(updates["sequence_number"])
+            if "target_files" in updates:
+                upd_cols.append("target_files=?")
+                args.append(json.dumps(updates["target_files"]))
+            if "acceptance_criteria" in updates:
+                upd_cols.append("acceptance_criteria=?")
+                args.append(json.dumps(updates["acceptance_criteria"]))
+            if "dependency_task_ids" in updates:
+                upd_cols.append("dependency_task_ids=?")
+                args.append(json.dumps(updates["dependency_task_ids"]))
+            if "pattern_ids" in updates:
+                upd_cols.append("pattern_ids=?")
+                args.append(json.dumps(updates["pattern_ids"]))
+            if "requirement_ids" in updates:
+                upd_cols.append("requirement_ids=?")
+                args.append(json.dumps(updates["requirement_ids"]))
+            if "research_citation_tags" in updates:
+                upd_cols.append("research_citation_tags=?")
+                args.append(json.dumps(updates["research_citation_tags"]))
+            if "status" in updates:
+                upd_cols.append("status=?")
+                args.append(updates["status"])
+
+            args.extend([run_id, task_id])
+            db.execute(f"UPDATE planning_tasks SET {', '.join(upd_cols)} WHERE run_id=? AND task_id=?", args)
+            db.commit()
+        tasks = self.get_planning_tasks(run_id)
+        return next(t for t in tasks if t["task_id"] == task_id)
+
+    def reorder_planning_tasks(self, run_id: str, task_ids_in_order: list[str]) -> list[dict]:
+        now = utc_now()
+        with self.connection() as db:
+            db.execute("BEGIN")
+            for idx, tid in enumerate(task_ids_in_order, start=1):
+                db.execute("UPDATE planning_tasks SET sequence_number=?, updated_at=? WHERE run_id=? AND task_id=?", (idx, now, run_id, tid))
+            db.commit()
+        return self.get_planning_tasks(run_id)
+
+    def split_planning_task(self, run_id: str, task_id: str, new_tasks: list[dict]) -> list[dict]:
+        import uuid
+        now = utc_now()
+        tasks = self.get_planning_tasks(run_id)
+        original = next((t for t in tasks if t["task_id"] == task_id), None)
+        if not original:
+            raise PersistenceError(f"task {task_id} not found for split")
+
+        orig_seq = original["sequence_number"]
+        with self.connection() as db:
+            db.execute("BEGIN")
+            db.execute("DELETE FROM planning_tasks WHERE run_id=? AND task_id=?", (run_id, task_id))
+            
+            num_new = len(new_tasks)
+            shift = num_new - 1
+            if shift != 0:
+                db.execute("UPDATE planning_tasks SET sequence_number = sequence_number + ? WHERE run_id=? AND sequence_number > ?", (shift, run_id, orig_seq))
+            
+            for idx, nt in enumerate(new_tasks):
+                seq = orig_seq + idx
+                nt_id = nt.get("task_id", f"{task_id}.{idx+1}")
+                title = nt.get("title", f"Split {idx+1}")
+                desc = nt.get("description", "")
+                t_files = json.dumps(nt.get("target_files", original["target_files"]))
+                a_crit = json.dumps(nt.get("acceptance_criteria", original["acceptance_criteria"]))
+                deps = json.dumps(nt.get("dependency_task_ids", original["dependency_task_ids"]))
+                pats = json.dumps(nt.get("pattern_ids", original["pattern_ids"]))
+                reqs = json.dumps(nt.get("requirement_ids", original["requirement_ids"]))
+                cits = json.dumps(nt.get("research_citation_tags", original["research_citation_tags"]))
+                db.execute(
+                    "INSERT INTO planning_tasks(run_id, task_id, sequence_number, title, description, target_files, acceptance_criteria, dependency_task_ids, pattern_ids, requirement_ids, research_citation_tags, status, created_at, updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?, 'PLANNED', ?, ?)",
+                    (run_id, nt_id, seq, title, desc, t_files, a_crit, deps, pats, reqs, cits, now, now)
+                )
+            
+            first_new_id = new_tasks[0].get("task_id", f"{task_id}.1")
+            remaining_tasks = db.execute("SELECT task_id, dependency_task_ids FROM planning_tasks WHERE run_id=?", (run_id,)).fetchall()
+            for rt in remaining_tasks:
+                rt_deps = json.loads(rt["dependency_task_ids"])
+                if task_id in rt_deps:
+                    new_deps = [d if d != task_id else first_new_id for d in rt_deps]
+                    db.execute("UPDATE planning_tasks SET dependency_task_ids=? WHERE run_id=? AND task_id=?", (json.dumps(new_deps), run_id, rt["task_id"]))
+
+            db.commit()
+        return self.get_planning_tasks(run_id)
+
+    def save_planning_validation_result(self, run_id: str, validation_iteration: int, passed: bool, coverage_errors: list, ordering_errors: list, pattern_fidelity_errors: list, atomicity_errors: list, details: dict) -> dict:
+        now = utc_now()
+        with self.connection() as db:
+            db.execute("BEGIN")
+            db.execute(
+                "INSERT INTO planning_validation_results(run_id, validation_iteration, passed, coverage_errors, ordering_errors, pattern_fidelity_errors, atomicity_errors, details, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(run_id, validation_iteration) DO UPDATE SET passed=excluded.passed, coverage_errors=excluded.coverage_errors, ordering_errors=excluded.ordering_errors, pattern_fidelity_errors=excluded.pattern_fidelity_errors, atomicity_errors=excluded.atomicity_errors, details=excluded.details, created_at=excluded.created_at",
+                (run_id, validation_iteration, 1 if passed else 0, json.dumps(coverage_errors), json.dumps(ordering_errors), json.dumps(pattern_fidelity_errors), json.dumps(atomicity_errors), json.dumps(details), now)
+            )
+            db.commit()
+        return self.get_latest_planning_validation_result(run_id)
+
+    def get_latest_planning_validation_result(self, run_id: str) -> Optional[dict]:
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM planning_validation_results WHERE run_id=? ORDER BY validation_iteration DESC LIMIT 1", (run_id,)).fetchone()
+            if not row:
+                return None
+            res = dict(row)
+            res["passed"] = bool(res["passed"])
+            res["coverage_errors"] = json.loads(res["coverage_errors"])
+            res["ordering_errors"] = json.loads(res["ordering_errors"])
+            res["pattern_fidelity_errors"] = json.loads(res["pattern_fidelity_errors"])
+            res["atomicity_errors"] = json.loads(res["atomicity_errors"])
+            res["details"] = json.loads(res["details"])
+            return res
+
+    def save_planning_approval_event(self, run_id: str, decision: str, feedback: Optional[str] = None, actor: Optional[str] = None) -> dict:
+        now = utc_now()
+        with self.connection() as db:
+            db.execute(
+                "INSERT INTO planning_approval_events(run_id, decision, feedback, actor, created_at) VALUES(?,?,?,?,?)",
+                (run_id, decision, feedback, actor, now)
+            )
+            db.commit()
+        return {"run_id": run_id, "decision": decision, "feedback": feedback, "actor": actor, "created_at": now}
+
+    def get_all_planning_artifacts(self, run_id: str, project_id: Optional[str] = None) -> dict:
+        run = self.get_planning_run(run_id, project_id=project_id)
+        patterns = self.get_selected_patterns(run_id)
+        research = self.get_research_findings(run_id)
+        try:
+            arch = self.get_architecture_document(run_id)
+        except PersistenceError:
+            arch = {}
+        tasks = self.get_planning_tasks(run_id)
+        val = self.get_latest_planning_validation_result(run_id)
+        return {
+            "run": run,
+            "patterns": patterns,
+            "research": research,
+            "architecture": arch,
+            "tasks": tasks,
+            "validation": val
+        }
+

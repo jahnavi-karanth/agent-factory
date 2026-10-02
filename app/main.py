@@ -35,6 +35,10 @@ from .pattern_models import (
     PatternUpdateRequest,
 )
 from .pattern_service import PatternService
+from .planning_models import PlanningWorkflowRequest, RejectionRequest, TaskPatchRequest
+from .planning_workflow import PlanningWorkflow
+
+
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -91,6 +95,7 @@ def create_app(
         {"name": "Project Management", "description": "Project creation, listing, retrieval, and status updates"},
         {"name": "Document Management", "description": "Document upload, structure parsing, outline sections, and semantic search"},
         {"name": "Requirements Workflow (M1-M3)", "description": "Project-bound LangGraph requirements workflow, per-run WebSocket HITL, SSE progress events, and artifact generation"},
+        {"name": "Planning Workflow (M4)", "description": "Combined Project & Code Planning Workflow: pattern selection, multi-source research, architecture, task planning, quality validation, and HITL approval gate"},
         {"name": "Pattern Knowledge Base", "description": "Agentic design pattern repository management and embedding search"},
         {"name": "System & Infrastructure", "description": "Health diagnostics and LangGraph diagram visualization"},
         {"name": "Legacy Standalone APIs (Deprecated)", "description": "Un-scoped legacy endpoints retained for backward compatibility"},
@@ -109,6 +114,8 @@ def create_app(
     filestore = FileStore()
     patterns_svc = pattern_service or PatternService(repository=artifacts, document_store=documents)
     patterns_svc.seed_initial_patterns()
+    planning_wf = PlanningWorkflow(artifacts, document_store=documents, pattern_service=patterns_svc)
+
 
     def interrupt_values(result: Dict[str, Any]) -> list[Any]:
         return [item.value if hasattr(item, "value") else item for item in result.get("__interrupt__", [])]
@@ -359,13 +366,52 @@ def create_app(
             payload = [{"question_id": item.get("id"), "answer": item.get("answer", "")} for item in payload.get("answers", [])]
         return await resume_workflow(project_id, run_id, WorkflowResumeRequest(payload=payload), user_id)
 
-    @app.post("/projects/{project_id}/runs/{run_id}/approve")
-    async def approve_run(project_id: str, run_id: str, request: WorkflowResumeRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+    @app.post("/projects/{project_id}/runs/{run_id}/approve", tags=["Requirements Workflow (M1-M3)", "Planning Workflow (M4)"])
+    async def approve_run(
+        project_id: str,
+        run_id: str,
+        body: Optional[Dict[str, Any]] = Body(None),
+        user_id: str = Depends(current_user)
+    ) -> Dict[str, Any]:
+        try:
+            artifacts.get_project(project_id, user_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        try:
+            run = artifacts.get_planning_run(run_id, project_id=project_id)
+            planning_wf.resume(run_id, {"decision": "APPROVE"})
+            artifacts.update_planning_run(run_id, approval_status="APPROVED", status="APPROVED")
+            return artifacts.get_planning_run(run_id, project_id=project_id)
+        except PersistenceError:
+            pass
+
         return await resume_workflow(project_id, run_id, WorkflowResumeRequest(payload={"decision": "APPROVE"}), user_id)
 
-    @app.post("/projects/{project_id}/runs/{run_id}/reject")
-    async def reject_run(project_id: str, run_id: str, request: WorkflowResumeRequest, user_id: str = Depends(current_user)) -> Dict[str, Any]:
-        feedback = request.payload.get("feedback", "") if isinstance(request.payload, dict) else str(request.payload)
+    @app.post("/projects/{project_id}/runs/{run_id}/reject", tags=["Requirements Workflow (M1-M3)", "Planning Workflow (M4)"])
+    async def reject_run(
+        project_id: str,
+        run_id: str,
+        body: Optional[Dict[str, Any]] = Body(None),
+        user_id: str = Depends(current_user)
+    ) -> Dict[str, Any]:
+        try:
+            artifacts.get_project(project_id, user_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        feedback = body.get("feedback", "") if isinstance(body, dict) else ""
+        if isinstance(body, dict) and "payload" in body and isinstance(body["payload"], dict):
+            feedback = body["payload"].get("feedback", feedback)
+
+        try:
+            run = artifacts.get_planning_run(run_id, project_id=project_id)
+            planning_wf.resume(run_id, {"decision": "REJECT", "feedback": feedback})
+            artifacts.update_planning_run(run_id, approval_status="REJECTED", rejection_feedback=feedback, status="REVISION_REQUESTED")
+            return artifacts.get_planning_run(run_id, project_id=project_id)
+        except PersistenceError:
+            pass
+
         return await resume_workflow(project_id, run_id, WorkflowResumeRequest(payload={"decision": "REJECT", "feedback": feedback}), user_id)
 
     @app.get("/projects/{project_id}/runs/{run_id}/events")
@@ -378,13 +424,17 @@ def create_app(
         body = "".join(f"event: {item['event_type']}\ndata: {json.dumps(item)}\n\n" for item in events)
         return StreamingResponse(iter([body]), media_type="text/event-stream")
 
-    @app.get("/projects/{project_id}/runs/{run_id}/artifacts")
+    @app.get("/projects/{project_id}/runs/{run_id}/artifacts", tags=["Requirements Workflow (M1-M3)", "Planning Workflow (M4)"])
     async def workflow_artifacts(project_id: str, run_id: str, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        artifacts.get_project(project_id, user_id)
         try:
-            artifacts.get_project(project_id, user_id)
-            return artifacts.get_artifacts(project_id, run_id)
-        except PersistenceError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            return artifacts.get_all_planning_artifacts(run_id, project_id=project_id)
+        except PersistenceError:
+            try:
+                return artifacts.get_artifacts(project_id, run_id)
+            except PersistenceError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+
 
     @app.get("/projects/{project_id}/runs")
     async def list_workflow_runs(project_id: str, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
@@ -617,9 +667,9 @@ def create_app(
                 token = authorization.split(" ", 1)[1] if authorization.lower().startswith("bearer ") else ""
             user_id = decode_token(token)
             artifacts.get_project(project_id, user_id)
-            artifacts.get_workflow_run(project_id, run_id)
             await websocket.accept()
-            pending = workflow.pending_interrupt(run_id)
+
+            pending = planning_wf.pending_interrupt(run_id) or workflow.pending_interrupt(run_id)
             if pending:
                 await websocket.send_json(pending)
             while True:
@@ -632,13 +682,24 @@ def create_app(
                 else:
                     await websocket.send_json({"type": "error", "code": "invalid_message", "message": "Expected clarification_response or approval_response"})
                     continue
-                result = workflow.resume(run_id, payload)
+
+                is_planning = True
+                try:
+                    artifacts.get_planning_run(run_id, project_id=project_id)
+                except Exception:
+                    is_planning = False
+
+                if is_planning:
+                    result = planning_wf.resume(run_id, payload)
+                else:
+                    result = workflow.resume(run_id, payload)
+
                 interrupted = bool(result.get("__interrupt__"))
                 status = "PAUSED" if interrupted else result.get("status", "COMPLETED")
-                artifacts.update_workflow_run(project_id, run_id, status)
                 artifacts.audit("WORKFLOW_HITL_WEBSOCKET_MESSAGE", "project", project_id, actor_id=user_id, details={"run_id": run_id, "type": message_type, "payload": payload})
                 if interrupted:
-                    await websocket.send_json(interrupt_values(result)[0])
+                    next_pending = planning_wf.pending_interrupt(run_id) or workflow.pending_interrupt(run_id)
+                    await websocket.send_json(next_pending or interrupt_values(result)[0])
                 else:
                     await websocket.send_json({"type": "completed", "run_id": run_id, "status": status})
                     break
@@ -649,6 +710,231 @@ def create_app(
                 await websocket.close(code=1008, reason=str(exc))
             except Exception:
                 return
+
+    # Milestone 4: Planning Workflow Routes
+
+    @app.post("/projects/{project_id}/workflows/planning", status_code=202, tags=["Planning Workflow (M4)"])
+    async def start_planning_workflow(
+        project_id: str,
+        request: PlanningWorkflowRequest = Body(default_factory=PlanningWorkflowRequest),
+        response: Response = None,
+        user_id: str = Depends(current_user)
+    ) -> Dict[str, Any]:
+        try:
+            artifacts.get_project(project_id, user_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        model: Optional[RequirementsModel] = None
+        version_id: Optional[int] = None
+
+        # Input precedence 1: requirements_model_version_id
+        if request.requirements_model_version_id is not None:
+            try:
+                with artifacts.connection() as db:
+                    row = db.execute("SELECT model_json, model_version_id FROM requirements_models WHERE model_version_id=?", (request.requirements_model_version_id,)).fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail=f"Requirements Model version {request.requirements_model_version_id} not found")
+                    model = RequirementsModel.model_validate_json(row["model_json"])
+                    version_id = int(row["model_version_id"])
+            except Exception as exc:
+                if isinstance(exc, HTTPException):
+                    raise exc
+                raise HTTPException(status_code=404, detail=f"Requirements Model version {request.requirements_model_version_id} not found") from exc
+
+        # Input precedence 2: document_ids supplied
+        if model is None and request.document_ids:
+            seen_docs = set()
+            clean_doc_ids = []
+            for d in request.document_ids:
+                if d not in seen_docs:
+                    seen_docs.add(d)
+                    clean_doc_ids.append(d)
+
+            for doc_id in clean_doc_ids:
+                doc = None
+                try:
+                    doc = artifacts.get_document(project_id, doc_id)
+                except PersistenceError as exc:
+                    with artifacts.connection() as db:
+                        row = db.execute("SELECT project_id FROM documents WHERE document_id=?", (doc_id,)).fetchone()
+                        if row:
+                            raise HTTPException(status_code=404, detail=f"Document '{doc_id}' does not belong to project '{project_id}'")
+                        else:
+                            raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found") from exc
+
+                if doc["status"] != "COMPLETED":
+                    raise HTTPException(status_code=400, detail=f"Document '{doc_id}' is not in COMPLETED status (status={doc['status']})")
+
+            all_chunks = []
+            for doc_id in clean_doc_ids:
+                chunks = artifacts.list_document_chunks(project_id, doc_id)
+                all_chunks.extend(chunks)
+
+            if not all_chunks:
+                raise HTTPException(status_code=400, detail="No document chunks found for the provided document_ids")
+
+            reconstructed_text = "\n\n".join(chunk.get("text", "") for chunk in all_chunks)
+            doc_hashes = [doc_id for doc_id in clean_doc_ids]
+
+            try:
+                extracted_model = ingestion.extract_requirements_model(
+                    content=reconstructed_text,
+                    file_type="markdown",
+                    source_filename=f"project-{project_id}-combined.md"
+                )
+                brd_id = f"BRD-{uuid.uuid4().hex[:8].upper()}"
+                extracted_model = extracted_model.model_copy(update={
+                    "brd_id": brd_id,
+                    "extraction_metadata": {
+                        "source_document_ids": clean_doc_ids,
+                        "content_hashes": doc_hashes,
+                        "project_id": project_id
+                    }
+                })
+                version_id = artifacts.save_requirements_model(extracted_model, reconstructed_text, "markdown")
+                model = extracted_model
+            except Exception as exc:
+                if isinstance(exc, HTTPException):
+                    raise exc
+                raise HTTPException(status_code=400, detail=f"Requirements extraction from documents failed: {exc}") from exc
+
+        # Input precedence 3: brd_id compatibility path
+        if model is None and request.brd_id:
+            try:
+                model, version_id = artifacts.get_requirements_model(request.brd_id)
+            except PersistenceError as exc:
+                raise HTTPException(status_code=404, detail=f"BRD '{request.brd_id}' not found") from exc
+
+        # Input precedence 4: latest resolved model for project
+        if model is None:
+            try:
+                with artifacts.connection() as db:
+                    row = db.execute(
+                        "SELECT rm.model_json, rm.model_version_id FROM requirements_models rm "
+                        "JOIN brds b ON rm.brd_id = b.brd_id "
+                        "WHERE b.brd_id LIKE ? OR b.source_filename LIKE ? ORDER BY rm.version DESC LIMIT 1",
+                        (f"%{project_id}%", f"%{project_id}%")
+                    ).fetchone()
+                    if row:
+                        model = RequirementsModel.model_validate_json(row["model_json"])
+                        version_id = int(row["model_version_id"])
+            except Exception:
+                pass
+
+
+        if model is None:
+            raise HTTPException(status_code=400, detail="No valid requirements model, document_ids, or brd_id provided to start planning workflow")
+
+        run_id = f"RUN-{uuid.uuid4().hex[:12].upper()}"
+        res = planning_wf.start(
+            project_id=project_id,
+            run_id=run_id,
+            requirements_model=model,
+            source_model_version_id=version_id,
+            source_document_ids=request.document_ids or []
+        )
+
+        if response:
+            response.headers["Location"] = f"/projects/{project_id}/runs/{run_id}"
+
+        run_data = artifacts.get_planning_run(run_id, project_id=project_id)
+        pending = planning_wf.pending_interrupt(run_id)
+        return {
+            "run_id": run_id,
+            "project_id": project_id,
+            "status": run_data.get("status", "RUNNING"),
+            "current_stage": run_data.get("current_stage", "INITIALIZING"),
+            "planning_route": run_data.get("planning_route", "simple"),
+            "source_model_version_id": version_id,
+            "approval_status": run_data.get("approval_status", "PENDING"),
+            "interrupt": pending
+        }
+
+    @app.get("/projects/{project_id}/runs/{run_id}/tasks", tags=["Planning Workflow (M4)"])
+    async def get_planning_tasks(project_id: str, run_id: str, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return artifacts.get_planning_tasks(run_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.patch("/projects/{project_id}/runs/{run_id}/tasks/{task_id}", tags=["Planning Workflow (M4)"])
+    async def patch_planning_task(
+        project_id: str,
+        run_id: str,
+        task_id: str,
+        request: TaskPatchRequest,
+        user_id: str = Depends(current_user)
+    ) -> list[Dict[str, Any]]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            run = artifacts.get_planning_run(run_id, project_id=project_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        if run.get("approval_status") == "APPROVED" or run.get("status") in ["APPROVED", "COMPLETED"]:
+            raise HTTPException(status_code=400, detail="Cannot edit planning tasks after plan has been approved")
+
+        if request.split_into:
+            tasks = artifacts.split_planning_task(run_id, task_id, [s.model_dump(mode="json") for s in request.split_into])
+        else:
+            updates = {}
+            if request.title is not None:
+                updates["title"] = request.title
+            if request.description is not None:
+                updates["description"] = request.description
+            if request.sequence_number is not None:
+                updates["sequence_number"] = request.sequence_number
+            if request.target_files is not None:
+                updates["target_files"] = request.target_files
+            if request.acceptance_criteria is not None:
+                updates["acceptance_criteria"] = request.acceptance_criteria
+            if request.dependency_task_ids is not None:
+                updates["dependency_task_ids"] = request.dependency_task_ids
+            artifacts.update_planning_task(run_id, task_id, updates)
+            tasks = artifacts.get_planning_tasks(run_id)
+
+        seq_map = {t["task_id"]: t["sequence_number"] for t in tasks}
+        for t in tasks:
+            tid = t["task_id"]
+            seq = t["sequence_number"]
+            for dep in t.get("dependency_task_ids", []):
+                if dep not in seq_map:
+                    raise HTTPException(status_code=400, detail=f"Task '{tid}' references missing dependency '{dep}'")
+                if seq_map[dep] >= seq:
+                    raise HTTPException(status_code=400, detail=f"Task '{tid}' has invalid forward or cyclic dependency on '{dep}'")
+
+        return tasks
+
+
+
+    @app.get("/projects/{project_id}/runs/{run_id}/patterns", tags=["Planning Workflow (M4)"])
+    async def get_run_patterns(project_id: str, run_id: str, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return artifacts.get_selected_patterns(run_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/projects/{project_id}/runs/{run_id}/research", tags=["Planning Workflow (M4)"])
+    async def get_run_research(project_id: str, run_id: str, user_id: str = Depends(current_user)) -> list[Dict[str, Any]]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return artifacts.get_research_findings(run_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/projects/{project_id}/runs/{run_id}/architecture", tags=["Planning Workflow (M4)"])
+    async def get_run_architecture(project_id: str, run_id: str, user_id: str = Depends(current_user)) -> Dict[str, Any]:
+        try:
+            artifacts.get_project(project_id, user_id)
+            return artifacts.get_architecture_document(run_id)
+        except PersistenceError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+
 
     # Pattern Knowledge Base Endpoints
 

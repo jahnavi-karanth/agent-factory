@@ -6,61 +6,19 @@ This repository implements the **AI Software Development Factory** backend:
 - **Milestone 1**: Project management, authentication, FileStore file storage, multi-format document ingestion (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.md`, `.txt`), parsing, section/chunk extraction, SQLite persistence, ChromaDB vector store embeddings with mandatory `project_id` metadata and isolation, and document status/sections APIs.
 - **Milestone 2**: Requirements Analysis, quality status classification (`INVALID`, `NEEDS_REWORK`, `READY_FOR_CLARIFICATION`, `READY`), gap/ambiguity issue identification, and neutral clarification questions.
 - **Milestone 3**: Human-in-the-Loop (HITL) WebSocket clarification sessions, follow-up round generation, best-decision fallbacks, workflow runs, and event streams.
-- **Pattern Knowledge Base**: Global architectural & agentic pattern registry (source-of-truth in SQLite `patterns` table, semantic search index in ChromaDB `patterns` collection), startup idempotent seeding from `seed_patterns.json` (includes all 10 canonical patterns: ReAct, Reflection, Planner-Executor, Multi-Agent Debate, Router, RAG, Tool-Use, Hierarchical Agents, Critic-Refine, Map-Reduce), REST CRUD APIs, and tag-filtered semantic vector search.
-
----
-
-## Change History & Reference Log
-
-### 1. Changes Made Prior to M1 Completion Prompt
-- **OpenAPI Authorize Button Fix**: Updated `app/auth.py` to use FastAPI's `HTTPBearer(auto_error=False)` security scheme instead of a plain header parameter. This populates `components.securitySchemes` in `openapi.json` and renders the green **Authorize** padlock button at the top right of Swagger UI (`/docs`).
-- **Environment Variable Loading (.env)**: Added `load_dotenv()` in `app/main.py` and `app/llm.py` so that `os.getenv("GEMINI_API_KEY")` and other parameters automatically load from `.env` on server startup.
-- **`python-dotenv` Dependency**: Added `python-dotenv>=1.0,<2` to `requirements.txt`.
-
-### 2. Changes Made for Official Milestone 1 Completion
-- **FileStore Abstraction** ([`app/filestore.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/filestore.py)):
-  - Implemented `FileStore` class storing uploaded raw files at `./data/projects/{project_id}/uploads/{document_id}.{ext}`.
-  - Built-in path traversal defenses against malicious filenames (`../../evil.txt`, absolute paths, special characters).
-- **Database Schema Extensions** ([`app/repository.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/repository.py)):
-  - Updated `projects` table to include `status` (`draft`, `ready`, `running`, `archived`) and `updated_at`.
-  - Added tables `documents`, `document_sections`, and `document_chunks` for persistence.
-  - Added repository CRUD methods: `list_projects`, `update_project`, `save_document`, `get_document`, `save_document_sections_and_chunks`, `list_document_sections`, and `list_document_chunks`.
-- **Alembic Migration** ([`alembic/versions/0004_documents_and_project_status.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/alembic/versions/0004_documents_and_project_status.py)):
-  - Created migration `0004_documents_and_project_status` for reproducible schema setup.
-- **Document Parser & Chunking** ([`app/parser.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/parser.py)):
-  - Extended text extraction for all 6 supported file formats (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.md`, `.txt`).
-  - Implemented `extract_sections_and_chunks()` returning `ParsedSection` and `ParsedChunk` with stable section IDs (`SEC-001`, `SEC-002`...) and chunk IDs.
-- **Vector Store Embeddings & Project Isolation** ([`app/document_store.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/document_store.py)):
-  - Added `add_chunks()` method storing chunk-level entries in ChromaDB's `documents` collection with mandatory metadata: `document_id`, `section_id`, `section_title`, `page`, `kind`, `project_id`.
-  - Enforced `where={"project_id": project_id}` filter on all vector search operations.
-- **REST API Endpoints** ([`app/main.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/main.py)):
-  - `POST /auth/login` (alias for `POST /auth/token`)
-  - `POST /projects` (creates project, validates status in `draft`, `ready`, `running`, `archived`)
-  - `GET /projects` (lists all projects owned by authenticated user)
-  - `GET /projects/{project_id}` (retrieves single project; 404 if unauthorized/missing)
-  - `PATCH /projects/{project_id}` (updates project name and/or status; 404 if unauthorized/missing)
-  - `POST /projects/{project_id}/documents` (multipart file upload for all 6 formats, FileStore storage, parsing, DB persistence, and ChromaDB chunk vector embedding)
-  - `GET /projects/{project_id}/documents/{document_id}` (retrieves document parse status & section/chunk counts)
-  - `GET /projects/{project_id}/documents/{document_id}/sections` (retrieves structured document sections)
-- **Official Milestone 1 Tests** ([`tests/test_m1_official.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/tests/test_m1_official.py)):
-  - Added 9 comprehensive integration test functions covering authentication, project lifecycle & isolation, all 6 file formats, path traversal defense, document status, section structure, and ChromaDB project isolation search.
-
-### 3. Changes Made for Pattern Knowledge Base
-- **Pydantic Models** ([`app/pattern_models.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/pattern_models.py)):
-  - Defined `PatternModel`, `PatternCreateRequest`, `PatternUpdateRequest`, `PatternSearchRequest`, `PatternSearchResult`.
-- **Database Schema & Migration** ([`app/repository.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/repository.py), [`alembic/versions/0005_patterns_table.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/alembic/versions/0005_patterns_table.py)):
-  - Created relational `patterns` table in SQLite (`id`, `name`, `intent`, `structure`, `when_to_use`, `when_not_to_use`, `prerequisites`, `references`, `tags`, `description`, `strengths`, `weaknesses`, `created_at`, `updated_at`).
-  - Implemented repository methods: `save_pattern`, `get_pattern`, `get_pattern_by_name`, `list_patterns`, `update_pattern`, `delete_pattern`.
-- **Semantic Vector Indexing** ([`app/document_store.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/document_store.py)):
-  - Created ChromaDB `patterns` collection.
-  - Implemented deterministic embedding text construction (`intent + structure + when_to_use`), `add_pattern_vector`, `delete_pattern_vector`, and `search_patterns`.
-- **Pattern Service & Startup Seeding** ([`app/pattern_service.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/pattern_service.py)):
-  - Implemented idempotent startup pattern seeding from `seed_patterns.json` at root.
-  - Managed complete DB and Chroma synchronization on pattern creation, updates, deletions, and searches.
-- **REST Endpoints & Route Wiring** ([`app/main.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/app/main.py)):
-  - Registered `POST /patterns`, `POST /patterns/bulk`, `POST /patterns/search`, `GET /patterns`, `GET /patterns/{pattern_id}`, `PATCH /patterns/{pattern_id}`, `DELETE /patterns/{pattern_id}`.
-- **Test Suite** ([`tests/test_patterns.py`](file:///Users/jahnavikaranth/Desktop/agent-factory/tests/test_patterns.py)):
-  - Added 6 test functions verifying startup seeding, CRUD operations, bulk creation, semantic vector search, tag filtering, and stale vector cleanup.
+- **Milestone 4 (Combined Project and Code Planning Workflow)**:
+  - **Document-to-Requirements Bridge**: Launch planning workflows from ingested documents (`document_ids`) or existing requirements models (`requirements_model_version_id`).
+  - **LangGraph `PlanningWorkflow` Orchestration**:
+    1. Complexity Classification (`simple` vs `complex` routing based on requirement and NFR metrics).
+    2. Pattern Selection (Retrieves architectural design patterns from the Pattern Knowledge Base).
+    3. Multi-Source Parallel Research (Queries document chunks, pattern KB, web search, and LLM synthesis with strict citation tags `[doc:...]`, `[kb:...]`, `[web:...]`, `[llm]`).
+    4. Architecture Specification (`Architecture.md` and `Architecture.json` generated for complex routes).
+    5. Task Planning (Generates atomic implementation tasks with strict sequencing, file targets, dependencies, requirement mappings, and acceptance criteria).
+    6. Quality Validation (Enforces requirement coverage, topological sequence ordering, pattern fidelity, atomicity, and citations).
+    7. Human-in-the-Loop Approval Gate (WebSocket & REST approval prompts with interrupt support).
+    8. Artifact Finalization (Persists `Architecture.json`, `Architecture.md`, and `Tasks.json` to project run directories).
+  - **Task Editing & Splitting**: REST endpoints (`PATCH /projects/{project_id}/runs/{run_id}/tasks/{task_id}`) supporting description edits, sequence reordering, and task splits into subtasks prior to plan approval.
+- **Pattern Knowledge Base**: Global architectural & agentic pattern registry (source-of-truth in SQLite `patterns` table, semantic search index in ChromaDB `patterns` collection), startup idempotent seeding from `seed_patterns.json` (includes 10 canonical patterns: ReAct, Reflection, Planner-Executor, Multi-Agent Debate, Router, RAG, Tool-Use, Hierarchical Agents, Critic-Refine, Map-Reduce), REST CRUD APIs, and tag-filtered semantic vector search.
 
 ---
 
@@ -69,20 +27,31 @@ This repository implements the **AI Software Development Factory** backend:
 ```text
 Client / Frontend
     │
-    ├── POST /auth/register & POST /auth/login -> JWT Token
+    ├── Authentication & Projects (JWT Token)
+    │     ├── POST /auth/register & POST /auth/login -> JWT Token
+    │     └── POST /projects -> Create Project Aggregate (status: draft|ready|running|archived)
     │
-    ├── POST /projects -> Create Project Aggregate (status: draft|ready|running|archived)
-    │
-    ├── POST /projects/{project_id}/documents (Multipart upload: .pdf, .docx, .pptx, .xlsx, .md, .txt)
+    ├── Document Processing Pipeline
+    │     ├── POST /projects/{project_id}/documents (Multipart upload: .pdf, .docx, .pptx, .xlsx, .md, .txt)
     │     ├── FileStore -> ./data/projects/{project_id}/uploads/{document_id}.{ext}
     │     ├── Parser -> Text & Headings Extraction -> Sections & Chunks (SEC-001, CHK-001)
     │     ├── SQLite Repository -> Persist documents, document_sections, document_chunks
     │     └── DocumentStore (ChromaDB) -> Upsert chunks to `documents` collection
-    │           └── Mandatory Metadata: document_id, section_id, section_title, page, kind, project_id
     │
-    ├── GET /projects/{project_id}/documents/{document_id} -> Status & counts
-    ├── GET /projects/{project_id}/documents/{document_id}/sections -> Section outline
-    ├── GET /projects/{project_id}/documents/search?q=... -> Project-filtered vector search (where={"project_id": project_id})
+    ├── Workflow 1 — Requirements Workflow (M1-M3)
+    │     ├── POST /projects/{project_id}/workflows/requirements
+    │     ├── LangGraph Workflow -> Analysis -> Gap Identification -> Question Generation
+    │     ├── WS /projects/{project_id}/runs/{run_id}/hitl -> Real-time Q&A Popups
+    │     └── POST /projects/{project_id}/runs/{run_id}/approve & /reject
+    │
+    ├── Workflow 2 — Combined Project & Code Planning Workflow (M4)
+    │     ├── POST /projects/{project_id}/workflows/planning (Document-to-Requirements Bridge)
+    │     ├── LangGraph PlanningWorkflow -> Complexity Route -> Pattern KB Selection -> Multi-Source Research
+    │     ├── Architecture Specification -> Architecture.md & Architecture.json
+    │     ├── Task Planning & Quality Validation -> Topological Sequence, Atomicity, Citations
+    │     ├── Task Patching & Splitting -> PATCH /projects/{project_id}/runs/{run_id}/tasks/{task_id}
+    │     ├── Approval Gate -> WS & REST (/projects/{project_id}/runs/{run_id}/approve & /reject)
+    │     └── Artifact Generation -> Architecture.json, Architecture.md, Tasks.json
     │
     └── Pattern Knowledge Base (Global Resource):
           ├── Startup Seeding -> Reads seed_patterns.json -> Synchronizes SQLite & ChromaDB
@@ -91,6 +60,24 @@ Client / Frontend
           ├── PATCH /patterns/{id} & DELETE /patterns/{id} -> Update / delete pattern & sync ChromaDB
           └── POST /patterns/search -> Semantic search via ChromaDB (intent + structure + when_to_use)
 ```
+
+---
+
+## Milestone 4 REST Endpoints
+
+| Method | Route | Description |
+|---|---|---|
+| `POST` | `/projects/{project_id}/workflows/planning` | Start Planning Workflow via document bridge or requirements model (`202 Accepted`) |
+| `GET` | `/projects/{project_id}/runs/{run_id}/tasks` | Retrieve implementation tasks for a planning run |
+| `PATCH` | `/projects/{project_id}/runs/{run_id}/tasks/{task_id}` | Edit task description, target files, sequence, or split task into subtasks |
+| `POST` | `/projects/{project_id}/runs/{run_id}/approve` | Approve plan via REST fallback (unlocks code generation stage) |
+| `POST` | `/projects/{project_id}/runs/{run_id}/reject` | Reject plan with feedback via REST fallback (triggers revision loop) |
+| `GET` | `/projects/{project_id}/runs/{run_id}/patterns` | Retrieve selected design patterns |
+| `GET` | `/projects/{project_id}/runs/{run_id}/research` | Retrieve multi-source research findings & citation tags |
+| `GET` | `/projects/{project_id}/runs/{run_id}/architecture` | Retrieve generated architecture specification (JSON & Markdown) |
+| `GET` | `/projects/{project_id}/runs/{run_id}/artifacts` | Consolidated endpoint for patterns, research, architecture, and tasks |
+| `GET` | `/projects/{project_id}/runs/{run_id}/events` | Real-time Server-Sent Events (SSE) stream for run status updates |
+| `WS` | `/projects/{project_id}/runs/{run_id}/hitl` | Dual-workflow WebSocket endpoint for interactive prompts & approval popups |
 
 ---
 
@@ -120,7 +107,7 @@ cp .env.example .env
 
 ### 2. Database Migrations
 
-Run Alembic schema migrations:
+Run Alembic schema migrations (up to `0006_planning_tables`):
 
 ```bash
 alembic upgrade head
@@ -138,7 +125,7 @@ Open interactive Swagger UI docs at: [http://127.0.0.1:8000/docs](http://127.0.0
 
 ---
 
-## End-to-End API Usage Guide
+## End-to-End Planning Workflow Usage Guide
 
 ### 1. Register and Login
 
@@ -154,51 +141,67 @@ curl -X POST http://127.0.0.1:8000/auth/login \
   -d '{"email":"dev@example.com","password":"Password123!"}'
 ```
 
-Response:
-```json
-{
-  "access_token": "<jwt-token-string>",
-  "token_type": "bearer"
-}
-```
-
-### 2. Pattern Knowledge Base APIs
+### 2. Upload Document and Launch Planning Workflow
 
 ```bash
-# List all patterns
-curl -X GET http://127.0.0.1:8000/patterns
+# Upload document
+curl -X POST http://127.0.0.1:8000/projects/PROJ-001/documents \
+  -H "Authorization: Bearer <token>" \
+  -F "file=@expense_brd.md"
 
-# List patterns by tag
-curl -X GET http://127.0.0.1:8000/patterns?tag=reasoning
-
-# Get pattern details by ID
-curl -X GET http://127.0.0.1:8000/patterns/PAT-001
-
-# Semantic search for patterns
-curl -X POST http://127.0.0.1:8000/patterns/search \
+# Start Planning Workflow via Document Bridge
+curl -X POST http://127.0.0.1:8000/projects/PROJ-001/workflows/planning \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{"query":"iterative reasoning with external tools","top_k":3}'
+  -d '{"document_ids":["DOC-001"]}'
+```
 
-# Create custom pattern
-curl -X POST http://127.0.0.1:8000/patterns \
+### 3. Fetch Tasks and Edit/Split
+
+```bash
+# Get Tasks
+curl -X GET http://127.0.0.1:8000/projects/PROJ-001/runs/RUN-001/tasks \
+  -H "Authorization: Bearer <token>"
+
+# Split Task TASK-002 into Subtasks
+curl -X PATCH http://127.0.0.1:8000/projects/PROJ-001/runs/RUN-001/tasks/TASK-002 \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Custom Agent Pattern",
-    "intent": "Solve multi-step tasks using specialized sub-agents",
-    "structure": ["Decompose", "Delegate", "Synthesize"],
-    "when_to_use": ["Complex modular workflows"],
-    "tags": ["multi-agent", "custom"]
+    "split_into": [
+      {
+        "title": "Subtask 2.1 — Service Layer",
+        "description": "Implement service methods.",
+        "target_files": ["app/service.py"],
+        "acceptance_criteria": ["Methods run without errors"]
+      },
+      {
+        "title": "Subtask 2.2 — Repository Layer",
+        "description": "Implement repository queries.",
+        "target_files": ["app/repository.py"],
+        "acceptance_criteria": ["Queries pass unit tests"]
+      }
+    ]
   }'
+```
+
+### 4. Approve Plan
+
+```bash
+curl -X POST http://127.0.0.1:8000/projects/PROJ-001/runs/RUN-001/approve \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
 ```
 
 ---
 
 ## Test Execution
 
-Run the complete test suite (90 tests):
+Run the complete test suite (111 unit & integration tests):
 
 ```bash
-uv run pytest
+./.venv/bin/pytest -q
 ```
 
-All tests mock external services and run locally using temporary SQLite databases and Chroma stores.
+All tests mock external LLM/web services and run locally using temporary SQLite databases and Chroma stores.
